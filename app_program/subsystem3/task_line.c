@@ -1,0 +1,150 @@
+/*
+ *	task_line.c
+ *	The Line and Barcode task (Figure 5 of the design review), core 1,
+ *	priority 8, released every 5 ms.  The logic is in line_core.c
+ *	(Region A) and barcode_core.c / code39.c (Region B); this file is the
+ *	RTOS side.
+ *	  Region A: sample both line sensors -> LINE_STATUS on change,
+ *	            JUNCTION, LINE_LOST
+ *	  Region B: move the edges the GP27 interrupt stored in edge_buf into
+ *	            the capture, and decode it once the sensor has been quiet
+ *	            for T_end.
+ */
+
+#include "subsystem3.h"
+#include "line_cfg.h"
+#include "drv_ir.h"
+#include "drv_barcode.h"
+#include "../subsystem2/subsystem2.h"	/* motion_get_snapshot(): odometer */
+#include "../subsystem4/subsystem4.h"	/* fault_flags, health_stamp() */
+#include "../subsystem5/subsystem5.h"	/* vc_event_q */
+
+#define LB_CAL_SAMPLES	32U
+
+LOCAL LC_CORE		s_lc;
+LOCAL BC_CORE		s_bc;
+LOCAL UH		s_seq;
+LOCAL LB_STATUS		s_status = {FALSE, FALSE, '-', 0U, 0U, 0U};
+
+LOCAL const LC_PARAMS s_lc_params = {
+	LB_JUNCTION_MS,		/* junction_ms */
+	LB_JUNCTION_MM,		/* junction_mm */
+	LB_T_LOST_MS		/* lost_ms */
+};
+
+LOCAL const BC_PARAMS s_bc_params = {
+	LB_T_MIN_US,			/* t_min_us */
+	LB_T_END_MIN_MS * 1000U,	/* t_end_min_us */
+	LB_T_END_FACTOR,		/* t_end_factor */
+	(UB)LB_BAR_LEVEL		/* bar_level */
+};
+
+EXPORT void line_cyclic_handler(void *exinf)
+{
+	(void)exinf;
+	(void)tk_wup_tsk(tid_line);
+}
+
+EXPORT void lb_get_status(LB_STATUS *out)
+{
+	*out = s_status;		/* single writer (this task); fields are words */
+}
+
+LOCAL void send_events(const EVT_LIST *ev)
+{
+	if (app_send_list(vc_event_q, (UB)SRC_LINE, &s_seq, ev) != E_OK) {
+		(void)tk_set_flg(fault_flags, FLT_QUEUE_OVF);
+	}
+}
+
+/* Startup checks: report the barcode sensor's analogue level and the
+   line sensors' digital levels.  Place the car centred on a straight
+   line before power-up: both line sensors should then read white. */
+LOCAL void calibrate(void)
+{
+	UW	mean, lo, hi;
+	BOOL	l, r;
+	ER	er = ir_barcode_ao(LB_CAL_SAMPLES, &mean, &lo, &hi);
+
+	if (er == E_OK) {
+		tm_printf((UB*)"[LB] barcode AO: mean %u, range %u..%u (0..4095)\n", mean, lo, hi);
+	} else {
+		tm_printf((UB*)"[LB] barcode AO not readable: %d\n", er);
+	}
+	ir_read_line(&l, &r);
+	tm_printf((UB*)"[LB] line sensors at start: left %s, right %s%s\n",
+		  l ? (UB*)"BLACK" : (UB*)"white", r ? (UB*)"BLACK" : (UB*)"white",
+		  (l || r) ? (UB*)"  (expected both white when centred)" : (UB*)"");
+}
+
+LOCAL void barcode_step(UW now_us)
+{
+	BC_EDGE		e;
+	BC_RESULT	res;
+	EVT_LIST	ev;
+
+	while (barcode_pop(&e)) {
+		bc_edge(&s_bc, e.t_us, e.level);
+	}
+	if (bc_poll(&s_bc, now_us, &res)) {
+		evt_list_clear(&ev);
+		if (res.result == C39_OK) {
+			(void)evt_list_add(&ev, (UB)EV_BARCODE, (W)res.c, bc_command_for(res.c));
+			s_status.last_char = res.c;
+			tm_printf((UB*)"[LB] barcode '%c'%s, narrow %u us\n", (INT)res.c,
+				  res.reversed ? (UB*)" (read backwards)" : (UB*)"", res.narrow_us);
+		} else {
+			(void)evt_list_add(&ev, (UB)EV_BARCODE_BAD, (W)res.result, (W)res.elements);
+			tm_printf((UB*)"[LB] barcode not decoded: reason %d, %u elements (need 29)\n",
+				  (INT)res.result, res.elements);
+		}
+		s_status.reads_ok = s_bc.ok;
+		s_status.reads_failed = s_bc.failed;
+		send_events(&ev);
+	}
+}
+
+EXPORT void line_task(INT stacd, void *exinf)
+{
+	EVT_LIST	ev;
+	MC_SNAPSHOT	snap = {0};
+	UW		overflows = 0U;
+	BOOL		l, r;
+
+	(void)stacd;
+	(void)exinf;
+
+	(void)ir_init();
+	if (barcode_init() != E_OK) {
+		tm_printf((UB*)"[LB] barcode interrupt set-up failed\n");
+		(void)tk_set_flg(fault_flags, FLT_LINE);
+	}
+	calibrate();
+	lc_init(&s_lc, &s_lc_params, app_ms());
+	bc_init(&s_bc, &s_bc_params);
+
+	while (1) {
+		(void)tk_slp_tsk(TMO_FEVR);
+		(void)tk_can_wup(TSK_SELF);	/* never "catch up" after a delay */
+
+		/* Region A */
+		ir_read_line(&l, &r);
+		(void)motion_get_snapshot(&snap);	/* on failure: keep the last one */
+		evt_list_clear(&ev);
+		lc_step(&s_lc, (l != FALSE), (r != FALSE), app_ms(), snap.odo_mm, &ev);
+		s_status.left_black = l;
+		s_status.right_black = r;
+		s_status.junctions = s_lc.junctions;
+		send_events(&ev);
+
+		/* Region B */
+		barcode_step(app_us());
+		if (barcode_overflows() != overflows) {
+			overflows = barcode_overflows();
+			tm_printf((UB*)"[LB] edge_buf overflow\n");
+			(void)tk_set_flg(fault_flags, FLT_LINE);
+		}
+
+		health_stamp(HEALTH_LINE);
+	}
+}

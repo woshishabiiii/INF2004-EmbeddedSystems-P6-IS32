@@ -1,0 +1,6 @@
+*.elf
+*.uf2
+*.map
+**/*.d
+**/*.o
+tools/elf2uf2
