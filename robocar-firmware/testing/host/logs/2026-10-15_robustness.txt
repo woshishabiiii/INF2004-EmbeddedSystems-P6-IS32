@@ -1,0 +1,59 @@
+# Robustness sweep, 2026-10-15T15:45Z (after the IS32 changes)
+# 48 simulated cars whose real motor and geometry differ from the values the firmware assumes.
+# Each line: ./sim -p <seed> <deadband permille> <feed-forward permille per mm/s> <true track mm> <true counts per mm> <right wheel efficiency>
+# Firmware assumes: deadband 250, feed-forward 1.60, track 130 mm, 2.00 counts/mm, equal wheels.
+# Every car runs all 20 scenarios (98 checks).
+
+## sweep A (python3 sweep.py 11 24)
+100 233 1.79 140 1.99 0.93 SIMULATION: 98 checks, 0 failed
+101 252 1.53 132 2.03 0.97 SIMULATION: 98 checks, 0 failed
+102 183 1.61 124 2.07 0.95 SIMULATION: 98 checks, 0 failed
+103 176 2.09 141 2.04 0.94 SIMULATION: 98 checks, 0 failed
+104 192 1.41 133 1.89 0.88 SIMULATION: 98 checks, 0 failed
+105 204 1.42 131 1.99 0.98 SIMULATION: 98 checks, 0 failed
+106 243 1.85 132 2.04 0.92 SIMULATION: 98 checks, 0 failed
+107 209 2.10 142 2.08 0.96 SIMULATION: 98 checks, 0 failed
+108 214 1.56 128 1.90 0.96 SIMULATION: 98 checks, 0 failed
+109 226 1.99 130 2.11 0.98 SIMULATION: 98 checks, 0 failed
+110 170 1.55 140 1.99 1.00 SIMULATION: 98 checks, 0 failed
+111 226 1.45 135 2.07 0.89 SIMULATION: 98 checks, 0 failed
+112 182 1.63 141 2.06 0.87 SIMULATION: 98 checks, 0 failed
+113 204 1.47 123 2.07 0.88 SIMULATION: 98 checks, 0 failed
+114 248 1.71 126 2.06 0.87 SIMULATION: 98 checks, 0 failed
+115 260 1.48 130 1.93 0.89 SIMULATION: 98 checks, 0 failed
+116 306 1.96 128 2.09 0.88 SIMULATION: 98 checks, 0 failed
+117 225 2.00 135 1.90 1.00 SIMULATION: 98 checks, 0 failed
+118 200 1.58 137 1.96 0.89 SIMULATION: 98 checks, 0 failed
+119 180 1.46 134 1.94 0.94 SIMULATION: 98 checks, 0 failed
+120 222 1.72 141 2.00 0.94 SIMULATION: 98 checks, 0 failed
+121 291 1.53 125 2.10 0.97 SIMULATION: 98 checks, 0 failed
+122 205 1.53 137 2.11 0.88 SIMULATION: 98 checks, 0 failed
+123 303 2.02 134 1.98 0.87 SIMULATION: 98 checks, 0 failed
+
+## sweep B (python3 sweep.py 23 24)
+100 299 2.06 140 1.90 0.94 SIMULATION: 98 checks, 0 failed
+101 229 1.77 125 1.93 0.92 SIMULATION: 98 checks, 0 failed
+102 201 1.72 122 1.90 0.96 SIMULATION: 98 checks, 0 failed
+103 229 1.76 137 1.97 0.86 SIMULATION: 98 checks, 0 failed
+104 280 1.81 135 2.03 1.00 SIMULATION: 98 checks, 0 failed
+105 221 1.93 129 2.02 0.95 SIMULATION: 98 checks, 0 failed
+106 214 1.46 131 2.05 0.94 SIMULATION: 98 checks, 0 failed
+107 233 1.85 126 1.92 0.90 SIMULATION: 98 checks, 0 failed
+108 284 1.54 124 1.90 0.86 SIMULATION: 98 checks, 0 failed
+109 209 1.80 138 1.96 0.91 SIMULATION: 98 checks, 0 failed
+110 210 1.61 138 2.01 0.89 SIMULATION: 98 checks, 0 failed
+111 185 1.95 136 2.08 0.89 SIMULATION: 98 checks, 0 failed
+112 246 2.04 134 2.11 0.88 SIMULATION: 98 checks, 0 failed
+113 307 1.44 130 1.89 0.97 SIMULATION: 98 checks, 0 failed
+114 266 2.08 138 2.11 0.93 SIMULATION: 98 checks, 0 failed
+115 308 1.92 129 2.11 0.91 SIMULATION: 98 checks, 0 failed
+116 197 1.45 131 1.93 0.99 SIMULATION: 98 checks, 0 failed
+117 303 1.55 124 2.01 0.88 SIMULATION: 98 checks, 0 failed
+118 246 1.97 127 1.98 0.99 SIMULATION: 98 checks, 0 failed
+119 232 1.64 140 2.08 0.98 SIMULATION: 98 checks, 0 failed
+120 266 1.69 136 2.08 0.95 SIMULATION: 98 checks, 0 failed
+121 203 1.61 130 2.07 0.93 SIMULATION: 98 checks, 0 failed
+122 247 1.98 124 2.03 0.90 SIMULATION: 98 checks, 0 failed
+123 248 1.98 127 2.11 0.86 SIMULATION: 98 checks, 0 failed
+
+TOTAL: 48 cars, 48 with 0 failed checks
