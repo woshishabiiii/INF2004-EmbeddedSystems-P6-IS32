@@ -13,7 +13,7 @@
 
 /* Set to -1 if a wheel counts down when it rolls forward */
 #define ENC_SIGN_LEFT	(1)	/* MEASURE: -1 if it counts down rolling forward */
-#define ENC_SIGN_RIGHT	(1)	/* MEASURE: -1 if it counts down rolling forward */
+#define ENC_SIGN_RIGHT	(-1)	/* MEASURE: -1 if it counts down rolling forward */
 
 typedef struct {
 	UINT		pin_a;

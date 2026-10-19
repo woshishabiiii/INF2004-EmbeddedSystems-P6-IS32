@@ -168,6 +168,8 @@ typedef struct {
 	int		json_fail;
 	int		json_n;
 	int		queue_errors;
+	bool		line_resend;	/* a LINE_STATUS was dropped (task_line.c) */
+	bool		terrain_resend;	/* a TERRAIN change was dropped (task_imu.c) */
 	int32_t		last_why;
 	uint32_t	stop_cmd_us;
 	uint32_t	stop_latency_us;
@@ -220,7 +222,7 @@ static void telemetry_step(SIM *s, bool periodic, bool heartbeat)
 		}
 		if (m.type == EV_STATE) {
 			s->states_seen |= 1U << m.p1;
-			if (m.p1 == VC_SAFE_STOP) {
+			if ((m.p1 == VC_SAFE_STOP) || (m.p1 == VC_HALTED)) {
 				s->last_why = m.p2;
 			}
 		} else if (m.type == EV_NAV) {
@@ -288,15 +290,22 @@ static void command_text(SIM *s, const char *text)
 }
 
 /* ---- motion control (mirrors task_motion.c) ----------------------------------- */
-static void push_list_vc(SIM *s, uint8_t src, const EVT_LIST *l)
+/* app_send_events(): a safety event that does not fit is a fault; any
+   other event is dropped and counted (q->drops).  Returns the dropped mask. */
+static uint32_t push_list_vc(SIM *s, uint8_t src, const EVT_LIST *l)
 {
-	uint32_t i;
+	uint32_t i, mask = 0U;
 
 	for (i = 0U; i < l->n; i++) {
 		if (!q_push(&s->vcq, src, l->ev[i].type, l->ev[i].p1, l->ev[i].p2, s->t_ms)) {
-			s->fault_flags |= FLT_QUEUE_OVF;
+			if (evt_is_safety(l->ev[i].type)) {
+				s->fault_flags |= FLT_QUEUE_OVF;
+			} else {
+				mask |= 1UL << i;
+			}
 		}
 	}
+	return mask;
 }
 
 static void motion_step(SIM *s, bool tick)
@@ -316,13 +325,11 @@ static void motion_step(SIM *s, bool tick)
 	in.tick = tick;
 	in.ncmd = 0U;
 	in.cmd = cmds;
-	if (tick) {
-		for (i = 0; i < s->mq_n; i++) {
-			cmds[i] = s->mq[i];
-		}
-		in.ncmd = (uint32_t)s->mq_n;
-		s->mq_n = 0;
+	for (i = 0; i < s->mq_n; i++) {		/* commands on every wake-up */
+		cmds[i] = s->mq[i];
 	}
+	in.ncmd = (uint32_t)s->mq_n;
+	s->mq_n = 0;
 	if (s->was_stopped && !in.cmd_stop && !in.fault_stop) {
 		mc_core_tune(&s->mc, s->params[2], s->params[3], s->params[4], s->params[5]);
 	}
@@ -408,12 +415,22 @@ static void line_step(SIM *s)
 	EVT_LIST	ev;
 	BC_RESULT	res;
 	int		i;
+	uint32_t	mask, k;
 	bool		l = car_sensor_black(&s->car, &s->w, CAR_LINE_FWD, CAR_LINE_HALF);
 	bool		r = car_sensor_black(&s->car, &s->w, CAR_LINE_FWD, -CAR_LINE_HALF);
 
 	evt_list_clear(&ev);
 	lc_step(&s->lc, l, r, s->t_ms, s->snap.odo_mm, &ev);
-	push_list_vc(s, SRC_LINE, &ev);
+	if (s->line_resend && ((ev.n == 0U) || (ev.ev[0].type != EV_LINE_STATUS))) {
+		(void)evt_list_add(&ev, EV_LINE_STATUS, l ? 1 : 0, r ? 1 : 0);
+	}
+	s->line_resend = false;
+	mask = push_list_vc(s, SRC_LINE, &ev);
+	for (k = 0U; k < ev.n; k++) {
+		if ((ev.ev[k].type == EV_LINE_STATUS) && ((mask & (1UL << k)) != 0U)) {
+			s->line_resend = true;
+		}
+	}
 	if ((getenv("SIM_LINE") != NULL) && (ev.n > 0U) && (ev.ev[0].type == EV_LINE_STATUS)) {
 		trace(s, "line %s%d%d", "", l ? 1 : 0, r ? 1 : 0);
 	}
@@ -429,7 +446,7 @@ static void line_step(SIM *s)
 		} else {
 			(void)evt_list_add(&ev, EV_BARCODE_BAD, (int32_t)res.result, (int32_t)res.elements);
 		}
-		push_list_vc(s, SRC_LINE, &ev);
+		(void)push_list_vc(s, SRC_LINE, &ev);
 	}
 	s->health[HEALTH_LINE] = s->t_ms | 1U;
 }
@@ -455,12 +472,21 @@ static void imu_step(SIM *s)
 	if (out.impact && (IMU_IMPACT_STOPS != 0)) {
 		s->fault_flags |= FLT_IMPACT;
 	}
+	if (s->terrain_resend) {
+		s->terrain_resend = !q_push(&s->vcq, SRC_IMU, EV_TERRAIN, s->imu.terrain, s->imu.pitch_cdeg, s->t_ms);
+	}
 	for (i = 0U; i < out.ev.n; i++) {
 		const APP_MSG *m = &out.ev.ev[i];
 
 		if ((m->type != EV_MOTION) && ((m->type != EV_IMPACT) || (IMU_IMPACT_STOPS != 0))) {
 			if (!q_push(&s->vcq, SRC_IMU, m->type, m->p1, m->p2, s->t_ms)) {
-				s->fault_flags |= FLT_QUEUE_OVF;
+				if (evt_is_safety(m->type)) {
+					s->fault_flags |= FLT_QUEUE_OVF;
+				} else if (m->type == EV_TERRAIN) {
+					s->terrain_resend = true;
+				} else {
+					/* dropped and counted */
+				}
 			}
 		}
 		(void)q_push(&s->telq, SRC_IMU, m->type, m->p1, m->p2, s->t_ms);
@@ -506,6 +532,14 @@ static void scan_step(SIM *s)
 	in.echo_high = (int32_t)(s->echo_high_until_us - s->t_us) > 0;
 
 	scan_core_step(&s->sc, &in, &out);
+	if (out.stop_motors) {				/* task_scan.c: motion_stop() */
+		if ((s->stop_flags & MC_CMD_STOP) == 0U) {
+			s->stop_req_us = s->t_us;
+		}
+		s->stop_flags |= MC_CMD_STOP;
+		motion_step(s, false);
+		trace(s, "OS stop at %s%d mm %d", "", s->sc.last_range, 0);
+	}
 	s->car.servo_cmd = out.servo_deg;
 	if (out.trigger) {
 		if (in.echo_high || s->ping_in_flight) {
@@ -535,7 +569,7 @@ static void scan_step(SIM *s)
 			       s->prof.right_clear_mm, s->prof.unknown_left, s->prof.unknown_right);
 		}
 	}
-	push_list_vc(s, SRC_SCAN, &out.ev);
+	(void)push_list_vc(s, SRC_SCAN, &out.ev);
 	s->health[HEALTH_SCAN] = s->t_ms | 1U;
 }
 
@@ -568,7 +602,9 @@ static void run_actions(SIM *s, const VC_ACTIONS *act)
 			if (getenv("SIM_HOLD") != NULL) {
 				trace(s, "hold %s%d %d", "", a->a, a->b);
 			}
-			(void)sim_motion_send(s, MC_CMD_SPEED, a->a, a->b, 0);
+			if (sim_motion_send(s, MC_CMD_SPEED, a->a, a->b, a->c)) {
+				motion_step(s, false);	/* motion_hold_speed() wakes the task */
+			}
 			break;
 		case VA_MOVE:
 			trace(s, "MOVE %s%d mm id %d", "", a->a, a->c);
@@ -585,8 +621,10 @@ static void run_actions(SIM *s, const VC_ACTIONS *act)
 			}
 			break;
 		case VA_STOP:
+			if ((s->stop_flags & MC_CMD_STOP) == 0U) {
+				s->stop_req_us = s->t_us;	/* the first request is timed */
+			}
 			s->stop_flags |= MC_CMD_STOP;
-			s->stop_req_us = s->t_us;
 			motion_step(s, false);		/* tk_wup_tsk: acts at once */
 			break;
 		case VA_CLEAR_STOP:
@@ -945,7 +983,7 @@ static void sc_barcode(bool verbose, const char *name, char c, int expect, bool 
 		      "no command: straight on");
 		break;
 	}
-	check(s, (s->states_seen & (1U << VC_SAFE_STOP)) == 0U, "no Safe Stop");
+	check(s, (s->states_seen & ((1U << VC_SAFE_STOP) | (1U << VC_HALTED))) == 0U, "no Safe Stop");
 	check(s, common_ok(s), "no queue overflow, every message <= 200 bytes");
 	free(s);
 }
@@ -999,7 +1037,7 @@ static void sc_hump(bool verbose)
 	check(s, (s->nhumps >= 1) && (s->humps[0] >= 8) && (s->humps[0] <= 16), "first hump 12 mm +/- 4");
 	check(s, (s->nhumps >= 2) && (s->humps[1] >= 19) && (s->humps[1] <= 31), "second hump 25 mm +/- 6");
 	check(s, (s->imu.max_hump_mm >= 19) && (s->imu.max_hump_mm <= 31), "highest hump of the run");
-	check(s, (s->states_seen & ((1U << VC_SEARCH) | (1U << VC_SAFE_STOP))) == 0U,
+	check(s, (s->states_seen & ((1U << VC_SEARCH) | (1U << VC_SAFE_STOP) | (1U << VC_HALTED))) == 0U,
 	      "kept the line, no Safe Stop");
 	check(s, (s->vc.state == VC_FOLLOW) && (s->car.x > 3000.0), "still following after both humps");
 	check(s, common_ok(s), "no queue overflow, every message <= 200 bytes");
@@ -1014,17 +1052,14 @@ static void sc_dead_end(bool verbose)
 	s->verbose = verbose;
 	w_line(&s->w, -200.0, 0.0, 700.0, 0.0);
 	script(s, 1500U, SC_CMD, 0, "1 START");
-	script(s, 20000U, SC_CMD, 0, "2 RESTART");
-	script(s, 21000U, SC_CMD, 0, "3 START");
+	script(s, 20000U, SC_CMD, 0, "2 START");
 	sim_run(s, 19000U);
-	check(s, (s->vc.state == VC_SAFE_STOP) && (s->last_why == VC_WHY_SEARCH_FAILED),
-	      "search fails -> Safe Stop (search failed)");
-	check(s, (s->car.duty[0] == 0.0) && (s->car.duty[1] == 0.0) && s->sm.faulted,
-	      "motors off, fault latched");
+	check(s, (s->vc.state == VC_HALTED) && (s->last_why == VC_WHY_SEARCH_FAILED),
+	      "search fails -> HALTED (line not found: a mission failure)");
+	check(s, (s->car.duty[0] == 0.0) && (s->car.duty[1] == 0.0) && !s->sm.faulted &&
+	      ((s->stop_flags & MC_CMD_STOP) != 0U), "motors stopped by CMD_STOP, no fault latched");
 	sim_run(s, 20500U);
-	check(s, (s->vc.state == VC_READY) && !s->sm.faulted, "RESTART clears the fault -> READY");
-	sim_run(s, 21500U);
-	check(s, s->vc.state == VC_FOLLOW, "START runs again");
+	check(s, s->vc.state == VC_FOLLOW, "START carries on (no RESTART needed)");
 	report(s);
 	check(s, common_ok(s), "no queue overflow, every message <= 200 bytes");
 	free(s);

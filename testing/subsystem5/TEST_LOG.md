@@ -21,9 +21,10 @@ Define a test here before running it. Test IDs never change.
 | S5-U04 | sin / cos table | FR5 | auto | `subsystem5_test.c` | PASS |
 | S5-U05 | Vehicle Controller waits for START | FR6 | auto | `subsystem5_test.c` | PASS |
 | S5-U06 | no pinging until START | FR5 | auto | `subsystem5_test.c` | PASS |
+| S5-U07 | TRIG GP0 and ECHO GP1 are plain GPIO on this kernel build (UART0 not on them) | A6 | auto | `subsystem5_test.c` | PASS |
 | S5-H01 | profile: width, closest point, wall beside the path, missing echoes: OP-01 … OP-05 | FR5 | host | `unit_tests.c` | all PASS |
-| S5-H02 | scan: 70 ms trigger gap, single ALERT, coarse + fine angles, time limit, sensor fault: SC-01 … SC-07 | FR5, NFR6 | host | `unit_tests.c` | all PASS |
-| S5-H03 | statechart: START, barcode at junction, stale DONE, STOP, faults, Continue / Bypass / Reverse decisions, timeouts: VC-01 … VC-21 | FR1–FR7 | host | `unit_tests.c` | all PASS |
+| S5-H02 | scan: 70 ms trigger gap, single ALERT, coarse + fine angles, time limit, sensor fault, the stop flag stops the car with the ALERT and not without it: SC-01 … SC-09 | FR5, NFR3, NFR6 | host | `unit_tests.c` | all PASS |
+| S5-H03 | statechart: START, barcode at junction, stale DONE, STOP, faults, Continue / Bypass / Reverse decisions, HALTED for mission failures, rescan, START after HALTED, the WATCH stop flag, latency timestamp: VC-01 … VC-24 | FR1–FR7 | host | `unit_tests.c` | all PASS |
 | S5-M01 | ECHO high level at 3.3 V | NFR5, A5 | manual | Before wiring GP1: power the module from 3V3, meter or scope on ECHO while pinging. | ≤ 3.3 V |
 | S5-M02 | range accuracy | FR5, A5 | manual | Board at 100, 200, 400, 800 mm straight ahead; read `rng`. | within ±10 mm |
 | S5-M03 | servo calibration | FR5 | manual | Find the pulse widths that point the sensor 30° right and 30° left of straight ahead; set `SERVO_US_AT_30DEG` / `_150DEG`. | 30° = right, 150° = left |
@@ -41,3 +42,4 @@ Add a new row for every run. Never edit or delete old rows.
 | Date | Test ID | Commit | Tester | Result | Log / evidence | Notes |
 |---|---|---|---|---|---|---|
 | 2026-10-14 | S5-H01 … | working tree | host | PASS | `testing/host/logs/2026-10-14_unit.txt` | laptop run of the logic modules; on-target rows to be added after flashing |
+| 2026-10-15 | S5-H01 … S5-H03 | working tree | host | PASS | `testing/host/logs/2026-10-15_unit.txt` | after the IS32 changes |

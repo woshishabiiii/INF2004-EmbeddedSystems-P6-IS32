@@ -25,7 +25,7 @@
 
 static const char * const s_names[VC_STATES] = {
 	"STARTUP", "READY", "FOLLOW", "EXEC", "SEARCH", "WAIT_ACK", "SCANNING",
-	"BYPASS", "REVERSE", "FIND_LINE", "ALIGN", "SAFE_STOP", "FINISHED"
+	"BYPASS", "REVERSE", "FIND_LINE", "ALIGN", "SAFE_STOP", "FINISHED", "HALTED"
 };
 
 static const char * const s_nav_names[NAV_REFUSED + 1] = {
@@ -98,7 +98,7 @@ static void do_hold(VC_CORE *v, VC_ACTIONS *act, uint32_t now, int32_t l, int32_
 	if (!v->hold_valid || (iabs32(l - v->hold_l) >= HOLD_DEADBAND) ||
 	    (iabs32(r - v->hold_r) >= HOLD_DEADBAND) ||
 	    ((now - v->hold_ms) >= v->p.hold_refresh_ms)) {
-		act_add(act, VA_HOLD, l, r, 0);
+		act_add(act, VA_HOLD, l, r, (int32_t)v->steer_src_ms);
 		v->hold_valid = true;
 		v->hold_l = l;
 		v->hold_r = r;
@@ -119,12 +119,22 @@ static void do_go(VC_ACTIONS *act)
 	act_add(act, VA_CLEAR_STOP, 0, 0, 0);
 }
 
+/* A WATCH normally carries SCAN_STOP_FLAG: Obstacle Scan then stops the
+   car itself on a confirmed close range.  Not while the car is driving
+   past an obstacle it has decided to pass (Continue, alert_mute_odo); the
+   flag is set again once it is past (vc_tick). */
 static void scan_set(VC_CORE *v, VC_ACTIONS *act, uint32_t mode, int32_t stop_mm)
 {
-	int32_t id = ((v->watch_id > v->scan_id) ? v->watch_id : v->scan_id) + 1;
+	int32_t		id = ((v->watch_id > v->scan_id) ? v->watch_id : v->scan_id) + 1;
+	uint32_t	flags = 0U;
 
+	v->watch_stops = false;
 	if (mode == SCAN_WATCH) {
 		v->watch_id = id;
+		if (v->odo_mm >= v->alert_mute_odo) {
+			v->watch_stops = true;
+			flags = SCAN_STOP_FLAG;
+		}
 	} else if (mode == SCAN_PROFILE) {
 		v->scan_id = id;
 		v->watch_id = 0;
@@ -132,7 +142,7 @@ static void scan_set(VC_CORE *v, VC_ACTIONS *act, uint32_t mode, int32_t stop_mm
 		v->watch_id = 0;	/* idle: every ALERT still queued is stale */
 	}
 	v->zone_near = false;
-	act_add(act, VA_SCAN, (int32_t)mode, stop_mm, id);
+	act_add(act, VA_SCAN, (int32_t)(mode | flags), stop_mm, id);
 }
 
 static void enter(VC_CORE *v, VC_ACTIONS *act, VC_STATE s, uint32_t now, int32_t why)
@@ -153,7 +163,7 @@ static bool on_hump(const VC_CORE *v, uint32_t now)
 	return (v->terrain != TERRAIN_LEVEL) || ((int32_t)(v->hump_until_ms - now) > 0);
 }
 
-/* ---- Safe Stop ------------------------------------------------------------ */
+/* ---- Safe Stop (safety fault) and Halted (mission failure) ---------------- */
 static void safe_stop(VC_CORE *v, VC_ACTIONS *act, uint32_t now, int32_t why)
 {
 	do_stop(v, act);
@@ -164,6 +174,17 @@ static void safe_stop(VC_CORE *v, VC_ACTIONS *act, uint32_t now, int32_t why)
 	v->why = why;
 	v->pending = 0;
 	enter(v, act, VC_SAFE_STOP, now, why);
+}
+
+/* A mission failure is not a fault: stop with CMD_STOP, report why, and
+   let START carry on -- nothing to latch or RESTART (feedback IS32). */
+static void mission_stop(VC_CORE *v, VC_ACTIONS *act, uint32_t now, int32_t why)
+{
+	do_stop(v, act);
+	scan_set(v, act, SCAN_IDLE, 0);
+	v->why = why;
+	v->pending = 0;
+	enter(v, act, VC_HALTED, now, why);
 }
 
 /* ---- Follow Line ---------------------------------------------------------- */
@@ -236,6 +257,19 @@ static void start_run(VC_CORE *v, VC_ACTIONS *act, uint32_t now)
 	resume_follow(v, act, now, v->ls.p.start_side, false);
 }
 
+/* START after HALTED: carry on with the same run (its counters and the
+   run summary continue).  The operator has put the car back on the line. */
+static void resume_run(VC_CORE *v, VC_ACTIONS *act, uint32_t now)
+{
+	v->retries = 0U;
+	v->pending = 0;
+	v->alert_mute_odo = v->odo_mm;
+	v->hump_until_ms = now;
+	v->why = VC_WHY_NONE;
+	do_go(act);
+	resume_follow(v, act, now, v->ls.last_side, false);
+}
+
 /* ---- Line Search ---------------------------------------------------------- */
 static void start_search(VC_CORE *v, VC_ACTIONS *act, uint32_t now, int32_t side)
 {
@@ -256,7 +290,7 @@ static void search_done(VC_CORE *v, VC_ACTIONS *act, uint32_t now)
 		v->step = 2;			/* back to where the search began */
 		do_turn(v, act, toward(v->search_side, DEG_SEARCH));
 	} else {
-		safe_stop(v, act, now, VC_WHY_SEARCH_FAILED);
+		mission_stop(v, act, now, VC_WHY_SEARCH_FAILED);
 	}
 }
 
@@ -324,9 +358,10 @@ static void exec_done(VC_CORE *v, VC_ACTIONS *act, uint32_t now)
 /* ---- Obstacles -------------------------------------------------------------- */
 static void obstacle_stop(VC_CORE *v, VC_ACTIONS *act, uint32_t now)
 {
-	do_stop(v, act);
+	do_stop(v, act);		/* Obstacle Scan has usually set it already */
 	scan_set(v, act, SCAN_IDLE, 0);
 	v->pending = 0;
+	v->rescanned = false;
 	v->episode_ms = now;
 	enter(v, act, VC_WAIT_ACK, now, VC_WHY_NONE);
 }
@@ -340,7 +375,7 @@ static void retry_or_stop(VC_CORE *v, VC_ACTIONS *act, uint32_t now)
 		enter(v, act, VC_REVERSE, now, VC_WHY_NONE);
 		do_move(v, act, -v->p.back_mm, v->p.move_speed);
 	} else {
-		safe_stop(v, act, now, VC_WHY_NO_ROUTE);
+		mission_stop(v, act, now, VC_WHY_NO_ROUTE);
 	}
 }
 
@@ -478,7 +513,9 @@ static void command(VC_CORE *v, int32_t cmd, VC_ACTIONS *act, uint32_t now)
 {
 	switch (cmd) {
 	case CMD_START:
-		if (((v->state == VC_READY) || (v->state == VC_FINISHED)) && !v->faulted) {
+		if ((v->state == VC_HALTED) && !v->faulted) {
+			resume_run(v, act, now);
+		} else if (((v->state == VC_READY) || (v->state == VC_FINISHED)) && !v->faulted) {
 			start_run(v, act, now);
 		} else {
 			tel(act, (uint8_t)EV_NAV, NAV_REFUSED, cmd);
@@ -500,14 +537,14 @@ static void command(VC_CORE *v, int32_t cmd, VC_ACTIONS *act, uint32_t now)
 		}
 		if (v->faulted) {
 			act_add(act, VA_RESTART, 0, 0, 0);	/* EV_FAULT_CLEAR follows */
-		} else if (v->state == VC_SAFE_STOP) {
+		} else if ((v->state == VC_SAFE_STOP) || (v->state == VC_HALTED)) {
 			enter(v, act, VC_READY, now, VC_WHY_NONE);
 		} else {
 			/* nothing to clear */
 		}
 		break;
 	case CMD_FINISH:
-		if (running(v) || (v->state == VC_READY)) {
+		if (running(v) || (v->state == VC_READY) || (v->state == VC_HALTED)) {
 			do_stop(v, act);
 			scan_set(v, act, SCAN_IDLE, 0);
 			tel(act, (uint8_t)EV_NAV, NAV_FINISH, v->odo_mm - v->run_start_odo);
@@ -526,7 +563,9 @@ static void on_line_status(VC_CORE *v, const APP_MSG *m, VC_ACTIONS *act, uint32
 	ls_update(&v->ls, m->p1 != 0, m->p2 != 0, now);
 	switch (v->state) {
 	case VC_FOLLOW:
+		v->steer_src_ms = m->t_ms;	/* latency log: this reading -> the hold */
 		follow_steer(v, act, now);
+		v->steer_src_ms = 0U;
 		break;
 	case VC_SEARCH:
 		if (black) {
@@ -582,7 +621,7 @@ static void on_alert(VC_CORE *v, VC_ACTIONS *act, uint32_t now)
 	case VC_BYPASS:
 	case VC_FIND_LINE:
 	case VC_ALIGN:
-		safe_stop(v, act, now, VC_WHY_BLOCKED);
+		mission_stop(v, act, now, VC_WHY_BLOCKED);	/* already stopped by Obstacle Scan */
 		break;
 	default:
 		break;
@@ -728,6 +767,9 @@ void vc_tick(VC_CORE *v, uint32_t now_ms, int32_t odo_mm, bool sensors_ready, VC
 		}
 		break;
 	case VC_FOLLOW:
+		if ((v->watch_id != 0) && !v->watch_stops && (odo_mm >= v->alert_mute_odo)) {
+			scan_set(v, act, SCAN_WATCH, v->p.stop_mm);	/* past it: stop on ALERT again */
+		}
 		if ((v->pending != 0) && (v->p.d_exec_mm > 0) &&
 		    ((odo_mm - v->pending_odo) >= v->p.d_exec_mm) && !on_hump(v, now_ms)) {
 			start_exec(v, act, now_ms, false);	/* no junction came */
@@ -737,12 +779,12 @@ void vc_tick(VC_CORE *v, uint32_t now_ms, int32_t odo_mm, bool sensors_ready, VC
 		break;
 	case VC_EXEC:
 		if (episode > v->p.t_exec_ms) {
-			safe_stop(v, act, now_ms, VC_WHY_EXEC_TIMEOUT);
+			mission_stop(v, act, now_ms, VC_WHY_EXEC_TIMEOUT);
 		}
 		break;
 	case VC_SEARCH:
 		if (episode > v->p.t_search_ms) {
-			safe_stop(v, act, now_ms, VC_WHY_SEARCH_FAILED);
+			mission_stop(v, act, now_ms, VC_WHY_SEARCH_FAILED);
 		}
 		break;
 	case VC_WAIT_ACK:
@@ -752,7 +794,13 @@ void vc_tick(VC_CORE *v, uint32_t now_ms, int32_t odo_mm, bool sensors_ready, VC
 		break;
 	case VC_SCANNING:
 		if (age > v->p.t_scan_ms) {
-			safe_stop(v, act, now_ms, VC_WHY_SCAN_FAILED);
+			if (!v->rescanned) {
+				v->rescanned = true;		/* retryable: scan once more */
+				scan_set(v, act, SCAN_PROFILE, 0);
+				enter(v, act, VC_SCANNING, now_ms, VC_WHY_NONE);
+			} else {
+				mission_stop(v, act, now_ms, VC_WHY_SCAN_FAILED);
+			}
 		}
 		break;
 	case VC_BYPASS:
@@ -760,10 +808,10 @@ void vc_tick(VC_CORE *v, uint32_t now_ms, int32_t odo_mm, bool sensors_ready, VC
 	case VC_FIND_LINE:
 	case VC_ALIGN:
 		if (episode > v->p.t_bypass_ms) {
-			safe_stop(v, act, now_ms, VC_WHY_BYPASS_TIMEOUT);
+			mission_stop(v, act, now_ms, VC_WHY_BYPASS_TIMEOUT);
 		}
 		break;
 	default:
-		break;				/* READY, SAFE_STOP, FINISHED: wait for commands */
+		break;				/* READY, SAFE_STOP, FINISHED, HALTED: wait for commands */
 	}
 }

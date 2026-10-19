@@ -52,16 +52,26 @@ EXPORT ER motion_turn_right(W angle_deg, W id)
 	return (angle_deg > 0) ? send_cmd(MC_CMD_TURN, -angle_deg, 0, id) : E_PAR;
 }
 
-EXPORT ER motion_hold_speed(W left_mm_s, W right_mm_s)
+/* A speed hold wakes Motion Control, which applies it at once instead of
+   at its next 20 ms tick: steering latency from a line reading to the new
+   wheel targets drops from up to 20 ms to well under 1 ms. */
+EXPORT ER motion_hold_speed(W left_mm_s, W right_mm_s, UW src_ms)
 {
-	return send_cmd(MC_CMD_SPEED, left_mm_s, right_mm_s, 0);
+	ER er = send_cmd(MC_CMD_SPEED, left_mm_s, right_mm_s, (W)src_ms);
+
+	return (er == E_OK) ? wake_motion() : er;
 }
 
 EXPORT ER motion_stop(void)
 {
-	ER er;
+	T_RFLG	rflg;
+	ER	er;
 
-	mc_stop_req_us = app_us();
+	/* Time the FIRST request: Obstacle Scan may stop the car and Vehicle
+	   Controller ask again a moment later. */
+	if ((tk_ref_flg(stop_flags, &rflg) != E_OK) || ((rflg.flgptn & MC_CMD_STOP) == 0U)) {
+		mc_stop_req_us = app_us();
+	}
 	er = tk_set_flg(stop_flags, MC_CMD_STOP);
 	return (er == E_OK) ? wake_motion() : er;
 }

@@ -17,7 +17,7 @@ Define a test here before running it. Test IDs never change.
 | SYS-03 | distance and turn accuracy | FR3 | manual | S2-M04 and S2-M05 on the course surface | ±10 mm, ±3° |
 | SYS-04 | hump detected and highest hump reported | FR4 | manual | Two humps of known height; FINISH at the end. | `hump` events; `summary.hmax` within ±30 % |
 | SYS-05 | obstacle on the line: stop, profile, bypass, rejoin | FR5 | manual | Box on a straight and on a gentle curve. | no contact; rejoins; detour shown in a video |
-| SYS-06 | no clear side: reverse and retry, then Safe Stop | FR5, FR7 | manual | Box between two walls. | 2 reverses, then Safe Stop with reason 5 |
+| SYS-06 | no clear side: reverse and retry, then stop | FR5 | manual | Box between two walls. | 2 reverses, then HALTED with reason 5 (no fault latched); START carries on |
 | SYS-07 | telemetry, commands, recovery over WiFi | FR6 | manual | Full run with MQTT Explorer; drop WiFi for 20 s mid-run. | telemetry throughout; the run continues |
 | SYS-08 | fault handling | FR7, NFR3 | manual | Unplug the ultrasonic mid-run; RESTART; START. | Safe Stop within 0.2 s; restart only after replugging |
 | SYS-09 | full course | all | manual | The real course, timed, 3 runs. | completes; record time and summary |

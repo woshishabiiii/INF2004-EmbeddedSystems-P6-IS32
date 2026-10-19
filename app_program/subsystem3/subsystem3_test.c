@@ -5,6 +5,7 @@
 
 #include "subsystem3.h"
 #include "line_cfg.h"
+#include "../gpio_irq.h"
 #include "../test_report.h"
 
 #if APP_TEST
@@ -64,6 +65,10 @@ EXPORT void subsystem3_test(void)
 	(void)tk_dly_tsk(20);
 	lb_get_status(&st);
 	TEST_CHECK("S3-U07", (st.reads_ok + st.reads_failed) == 0U, "no barcode read while standing still");
+
+	/* I2C1's default pins are GP6/GP7: confirm the kernel did not start it */
+	TEST_CHECK("S3-U08", (gpio_funcsel(6U) == GPIO_FUNC_SIO) && (gpio_funcsel(7U) == GPIO_FUNC_SIO) &&
+		   (gpio_funcsel(27U) == GPIO_FUNC_SIO), "line and barcode DO pins are plain GPIO (I2C1 off)");
 
 	TEST_SUMMARY("subsystem3");
 }

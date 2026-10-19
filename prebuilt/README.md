@@ -1,6 +1,6 @@
 # Prebuilt images
 
-Built from this tree on 2026-10-14 with the default values in the `*_cfg.h`
+Built from this tree on 2026-10-15 with the default values in the `*_cfg.h`
 headers (nothing measured yet), dual-core, USB serial console, no MQTT.
 
 | File | Same as | Use |

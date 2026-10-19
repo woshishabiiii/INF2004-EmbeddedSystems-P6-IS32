@@ -55,7 +55,7 @@ may run immediately, so every object it might use must already exist.
 
 | Core | Task | Priority | Released | Buddy |
 |---|---|---|---|---|
-| 1 | Motion Control | 6 | every 20 ms + at once on a stop | 2 |
+| 1 | Motion Control | 6 | every 20 ms + at once on a stop or a new speed hold | 2 |
 | 0 | Safety Monitor | 7 | any fault bit, else every 20 ms | 4 |
 | 1 | Line and Barcode | 8 | every 5 ms | 3 |
 | 1 | Vehicle Controller | 9 | every event + 20 ms tick | 5 |
@@ -87,9 +87,17 @@ they never "catch up" with a burst of runs.
 | `fault_flags` | event flag | any task → Safety Monitor | `FLT_...` bits, `FLT_RESTART_REQ` |
 | `mtx_snapshot` | mutex (priority inheritance) | Motion Control → readers | the odometry snapshot |
 
-**Every send uses `TMO_POL`** (never waits). A full queue to Vehicle
-Controller or Motion Control is a fault (`FLT_QUEUE_OVF` → Safe Stop); a full
-telemetry queue just drops the record — telemetry must never slow control.
+**Every send uses `TMO_POL`** (never waits). What happens when
+`vc_event_q` is full depends on the event (`evt_is_safety()` in `app_evt.c`,
+used by `app_send_event(s)`): a **safety** event — FAULT, FAULT_CLEAR, IMPACT,
+ALERT, STOP_ACK, BUTTON, COMMAND — must arrive, so losing one is a fault
+(`FLT_QUEUE_OVF` → Safe Stop); **any other** event is dropped and counted,
+and a dropped line status or terrain change is sent again on the next cycle.
+A full Motion Control queue is a fault; a full telemetry queue just drops
+the record — telemetry must never slow control. (Sizing: under 400
+events/s even in the worst case, against about 350 instructions per event
+in Vehicle Controller, so 32 slots is a wide margin; the peak backlog is
+logged as `vq` in the `tim` event.)
 
 The shared event record (`app_evt.h`) is 16 bytes:
 `type, source, seq, t_ms, p1, p2`. The meaning of `p1`/`p2` per event type
@@ -112,36 +120,45 @@ fields from the same moment, so it is copied under `mtx_snapshot`.
    FOLLOW.
 3. **Following.** Line and Barcode sends `EV_LINE_STATUS` whenever a
    sensor changes. VC runs the steering rule (Buddy 3's `ls_output`) and
-   sends wheel speeds with `motion_hold_speed()`. Motion Control's PI loops
-   hold those speeds.
+   sends wheel speeds with `motion_hold_speed()`, which wakes Motion Control:
+   the new speeds are applied at once, not at the next 20 ms tick, and the
+   latency from the line reading is logged. Motion Control's PI loops hold
+   those speeds.
 4. **Barcode.** The barcode sensor's edges are timestamped by the GPIO
    interrupt; the Line task decodes the Code 39 character and sends
    `EV_BARCODE ['A', TURN_LEFT]`. VC stores it as *pending* and slows down.
 5. **Junction.** Both line sensors black → `EV_JUNCTION`. VC drives the
    axle onto the junction (`motion_move_forward`), waits for `EV_DONE`,
    turns 90° (`motion_turn_left`), waits for `EV_DONE`, follows the branch.
-6. **Obstacle.** Obstacle Scan sees something within 250 mm twice →
-   `EV_ALERT`. VC stops (`motion_stop`), waits for `EV_STOP_ACK`, asks for a
-   PROFILE scan, gets `EV_PROFILE`, decides Continue / Bypass / Reverse, then
-   drives the bypass as a list of moves and turns, finds the line again and
-   lines up with it.
+6. **Obstacle.** Obstacle Scan sees something within 250 mm twice → it
+   sets `CMD_STOP` itself (`motion_stop`) and sends `EV_ALERT`. VC confirms
+   the stop, waits for `EV_STOP_ACK`, asks for a PROFILE scan, gets
+   `EV_PROFILE`, decides Continue / Bypass / Reverse, then drives the bypass
+   as a list of moves and turns, finds the line again and lines up with it.
 7. **Hump.** The IMU sees the nose rise → `EV_TERRAIN CLIMBING`. VC drives
    straight on the encoders until `EV_TERRAIN LEVEL`; the IMU reports
    `EV_HUMP [height, highest]` when the car is past it.
-8. **Fault.** Anything wrong → a task sets its bit in `fault_flags` →
+8. **Fault.** A safety fault → a task sets its bit in `fault_flags` →
    Safety Monitor latches `FAULT_STOP` (motors off within microseconds) and
-   sends `EV_FAULT` → VC enters SAFE_STOP. RESTART clears it.
+   sends `EV_FAULT` → VC enters SAFE_STOP. RESTART clears it. A **mission
+   failure** (line not found, no way round, ...) is not a fault: VC stops
+   with `CMD_STOP` and shows HALTED with the reason; START carries on (fault
+   table in `safety_core.h` and `TEAM.md` section 3).
 9. **FINISH** over MQTT → VC stops and sends `NAV_FINISH`; Telemetry
    publishes the run summary (time, distance, highest hump …).
 
-Throughout, Telemetry publishes the state twice a second and every event as
-it happens.
+Throughout, Telemetry publishes the state twice a second, every event as it
+happens, and every 5 s a `tim` event with the timing measurements (task run
+times, missed releases, interrupt load, queue backlog, steering and stop
+latency, stopping distance, reconnect time).
 
 ### 0.6 Shared files (team agreement)
 
 `app.h` (task helpers, stack size), `app_evt.h/.c` (event record, event
-numbers, the small `EVT_LIST` the logic modules fill), `app_msg.h` +
-`app_common.c` (`app_send()`, `app_ms()`, `app_us()`, `app_timer_init()`),
+numbers, the small `EVT_LIST` the logic modules fill, `evt_is_safety()`),
+`app_msg.h` + `app_common.c` (`app_send()`, `app_send_event(s)` with the
+overflow policy, the task-timing table, `app_ms()`, `app_us()`,
+`app_timer_init()`),
 `app_main.c`, and `gpio_irq.c/.h` (maintained by Buddy 2, see 2.6). Outside
 `app_program/`, the team changed a few template files (listed in `TEAM.md`
 section 3), most importantly `lib/liblwip/sysdepend/pico_rp2040/mqtt_utk.c`
@@ -173,6 +190,7 @@ forever:
   2. empty telemetry_q (no waiting)        -> one "event" message per record
   3. every 500 ms: gather() + telemetry message
      every 1 s:    gather() + status (heartbeat) message
+     every 5 s:    timing_message() -> "tim" event
 ```
 
 Waiting on the command buffer (instead of sleeping 100 ms) means a remote
@@ -192,8 +210,8 @@ Format: `<seq> <VERB> [<name> <value>]`, for example `12 START`,
 
 Checks, in order, each with its own error code (`cmd_err_t`): length ≤ 64;
 `seq` is a number; the verb is known; for SET the name is in the whitelist
-and the value within its limits, and the car is not running (READY or
-FINISHED only); no extra words; and finally **`seq` is larger than the last
+and the value within its limits, and the car is not running (READY,
+FINISHED or HALTED only); no extra words; and finally **`seq` is larger than the last
 accepted one** — so a repeated or delayed MQTT message is ignored. The
 sequence check comes last so that a rejected command never "uses up" a
 number.
@@ -231,7 +249,7 @@ Topics (prefix `car/g07/`, set in `net_bridge.c`):
 |---|---|---|
 | `telemetry` | every 0.5 s | state, wheel speeds, encoder counts, distance, line sensors, last barcode, pending command, pitch, motion class, highest hump, range, turn rate, faults |
 | `status` | every 1 s | uptime, state, last Safe Stop reason, faults, motion fault code, IMU ok, heading, pings, WiFi/MQTT state and counters |
-| `event` | on change | state changes, navigation decisions, barcodes, junctions, humps, terrain, motion class, obstacle profile, impacts, faults, command acknowledgements, run summary |
+| `event` | on change | state changes, navigation decisions, barcodes, junctions, humps, terrain, motion class, obstacle profile, impacts, faults, command acknowledgements, run summary; every 5 s the `tim` timing event |
 
 Field meanings are in `CAR_GUIDE.md` section 5. When `NAV_FINISH` arrives,
 the task also builds the **run summary** (time, distance, highest hump,
@@ -252,7 +270,9 @@ this subsystem never calls them. Instead:
   message on that topic goes to `net_bridge_put()`, which puts it in
   `mqtt_rx_mbf` (`TMO_POL`; too long or buffer full is counted, not
   blocked).
-- `net_bridge_link()` keeps `net_up` / `net_connects` for the status topic.
+- `net_bridge_link()` keeps `net_up` / `net_connects` for the status topic,
+  and measures the **reconnect time** (connection lost → back) as
+  `net_reconnect_ms` (`rc` in the `tim` event).
 
 `net_bridge.c` uses only plain C types in these functions because
 `mqtt_utk.c` must not include the kernel headers (template rule).
@@ -267,14 +287,21 @@ less often so the console stays readable.
 - `config/wifi_secrets.h` (copy the example): SSID, password, broker IP.
 - Status counters: `txd` (messages dropped because the network was slow),
   `rxd` (commands dropped), `nerr` (too long / refused). All should stay 0.
+- The `tim` event (every 5 s): `mc ln vc sc im sm tl` = longest run of each
+  task in µs, `ov` = releases missed, `irq` = GPIO interrupts per second,
+  `irqm` = longest interrupt in µs, `vq` = most events waiting in
+  `vc_event_q`, `dr` = events dropped, `sl` = steering latency (ms, line
+  reading → new wheel targets), `st` = stop latency (µs, request → duty 0),
+  `sd` = last stopping distance (mm), `rc` = last reconnect time (ms).
 
 ### 1.7 Tests
 
 Host: `CMD-01…12` (case, CR LF, old sequence numbers, extra or missing
 words, limits, exact names, SET while running, over-long and absurd input)
-and `TEL-01…05` (every periodic message fits in 200 bytes with the largest
-numbers, quotes escaped, a message that does not fit is refused, never cut
-short). On target: S1-U01…U10. Manual: S1-M01…M04 in
+and `TEL-01…06` (every periodic message, the timing message included, fits
+in 200 bytes with the largest numbers, quotes escaped, a message that does
+not fit is refused, never cut short); `EVT-01` (which events are safety
+events). On target: S1-U01…U10. Manual: S1-M01…M04 in
 `testing/subsystem1/TEST_LOG.md` (connect and publish, command round
 trip, WiFi loss does not stop the run, message rate under load).
 
@@ -304,7 +331,7 @@ odometry snapshot (Line, IMU, VC, Telemetry).
 ```c
 motion_move_forward(mm, speed, id)   motion_move_backward(mm, speed, id)
 motion_turn_left(deg, id)            motion_turn_right(deg, id)
-motion_hold_speed(left, right)       motion_stop() / motion_clear_stop()
+motion_hold_speed(left, right, src_ms)   motion_stop() / motion_clear_stop()
 motion_fault_stop() / motion_clear_fault_stop()   motion_get_snapshot(&snap)
 ```
 
@@ -316,15 +343,24 @@ move in progress. Moves and turns carry an `id` that comes back in
 ones. Only VC sends moves; only Safety Monitor uses the fault-stop pair.
 
 `motion_stop()` / `motion_fault_stop()` set their bit in `stop_flags`,
-record the time, and **wake the Motion task immediately** (`tk_wup_tsk`) —
-a stop does not wait for the next 20 ms tick.
+record the time (the first request, if two tasks ask), and **wake the
+Motion task immediately** (`tk_wup_tsk`) — a stop does not wait for the next
+20 ms tick. Vehicle Controller calls `motion_stop()`, and so does Obstacle
+Scan on a confirmed close range.
+
+`motion_hold_speed()` also wakes the task, so a steering change from the
+line sensors is applied at once instead of up to 20 ms later (design-review
+feedback: steering went Line → VC → Motion Control at 20 ms). `src_ms` is
+the time of the line reading that caused the hold (0 if none): Motion
+Control logs the latency from that reading to the new wheel targets
+(`steer_lat_ms` in the snapshot, `sl` in the `tim` event).
 
 ### 2.3 The task (core 1, priority 6 — the most urgent)
 
 ```
 on every wake-up:
-  read stop_flags, both encoder counts, the time
-  if it was the 20 ms tick: take up to 8 queued commands
+  read stop_flags, both encoder counts, the time, up to 8 queued commands
+  (count a missed tick as an overrun)
   if the stop bits just cleared (START): load SET values (gains, calibration)
   mc_core_step()
   write both motor duties                    <- always first
@@ -332,6 +368,7 @@ on every wake-up:
   own fault: motion_fault_stop() + FLT_MOTION
   send EV_DONE / EV_STOP_ACK to VC
   on the tick: copy the snapshot under the mutex, stamp health
+  record this run's time (app_task_time)
 ```
 
 ### 2.4 The logic, one step (`mc_core_step`)
@@ -347,7 +384,11 @@ on every wake-up:
    measured over 5 periods (100 ms) — one encoder count is a big step over
    one period, so a shorter window would be noise.
 3. **Commands.** Refused while STOPPED/FAULT or invalid; otherwise start
-   the move (speed hold, distance, or turn).
+   the move (speed hold, distance, or turn). **Between ticks** (woken by a
+   speed hold) only this step runs, plus the new wheel targets and duties
+   from the feed-forward and the present integral — the speed measurement,
+   the ramp and the integrators move only on the tick, and a distance or
+   turn starts on the next tick.
 4. **The active move.**
    - *Speed hold* (line following): the common speed ramps at
      600 mm/s²; the steering difference is scaled with it, so while the car
@@ -381,8 +422,10 @@ on every wake-up:
    acceleration, distances, turn rate `(v_right − v_left) / track`, mode,
    fault code.
 
-`EV_STOP_ACK [latency µs]` is sent once both wheels are below 20 mm/s after
-a `CMD_STOP` — VC waits for it before it lets the servo scan.
+`EV_STOP_ACK [latency µs, stopping distance mm]` is sent once both wheels
+are below 20 mm/s after a `CMD_STOP` — VC waits for it before it lets the
+servo scan. The snapshot also keeps the longest stop latency (request →
+duty 0) and the last stopping distance, for the `tim` event.
 
 ### 2.5 Drivers
 
@@ -409,7 +452,13 @@ barcode GP27, echo GP1), and the single handler reads the 1 µs timer
 **first**, then calls each pin's callback with that timestamp. Enabling is
 done once, from the Motion task on core 1 (the NVIC is per core). Callback
 rules: count, timestamp, store; never wait or print. `gpio_irq_max_us`
-records the longest handler run, for the timing tests.
+records the longest handler run, and `gpio_irq_calls` counts entries, for
+the timing tests (`irq` and `irqm` in the `tim` event). Edge rate to expect:
+counts per metre × speed × 2 wheels — 1,600/s at 400 mm/s with the
+placeholder 2,000 counts/m. Move the encoders to a PIO decoder only if the
+measured value is above about 20,000 counts/m (encoder interrupts then over
+5 % of core 1). `gpio_funcsel()` reads a pin's function, for the on-target
+pin checks.
 
 ### 2.7 What to measure and tune (`motion_cfg.h`)
 
@@ -426,9 +475,11 @@ Host: `MC-01…15` (a 500 mm move within 10 mm with its id, both wheels
 equal, odometer vs net distance, a 90° turn, the speed ramp, CMD_STOP acted
 on in the wake-up itself with the queue flushed, STOP_ACK, FAULT_STOP wins,
 stall, own fault held until Safety Monitor has seen it, encoder backwards,
-invalid commands, SET tuning). Simulator: every
+invalid commands, SET tuning, `MC-16` a hold between ticks is applied at
+once, `MC-17` stopping distance and stop latency logged). Simulator: every
 scenario drives the real `mc_core.c` on a simulated motor with a deadband,
-a 60 ms lag and a weaker right wheel. On target: S2-U01…U08. Manual: S2-M01…M08
+a 60 ms lag and a weaker right wheel. On target: S2-U01…U09 (U09: the
+encoder pins are plain GPIO on the real kernel build). Manual: S2-M01…M08
 in `testing/subsystem2/TEST_LOG.md` (directions, encoder signs, counts per
 metre, distance and turn accuracy, speed step response, stop latency,
 stall fault).
@@ -460,9 +511,14 @@ Region A: read both line sensors (one register read), the odometer
           lc_step() -> LINE_STATUS on change, JUNCTION, LINE_LOST -> VC
 Region B: move edges from the interrupt's ring buffer into the capture
           bc_poll() -> when the barcode is over: decode -> BARCODE or BARCODE_BAD -> VC
-          ring buffer overflowed? -> FLT_LINE
-stamp health
+          ring buffer overflowed? -> abandon that capture, BARCODE_BAD [100]
+          (counted; not a fault: the car carries on)
+stamp health, record this run's time
 ```
+
+None of this task's events is a safety event, so if `vc_event_q` is full
+they are dropped and counted; a dropped `LINE_STATUS` is sent again on the
+next 5 ms cycle, so VC never steers on a stale reading for longer than that.
 
 At start-up `calibrate()` prints the barcode sensor's analogue level and the
 two line sensors (they should read white with the car centred on a line).
@@ -476,7 +532,13 @@ the car drifted right, right black = drifted left, both black = junction.
   these, so it reacts within 5 ms without being flooded).
 - **Junction**: both black for at least **10 ms and 4 mm of travel**. The
   travel condition matters: a car standing still on a black band is not a
-  junction. One event per crossing.
+  junction. One event per crossing. A barcode band can never look like a
+  junction on the supplied course: the bars start 29 mm from the line
+  centre, the line sensors are 12.5 mm from it (16.5 mm clear). If a course
+  ever puts a band across the line, raise `LB_JUNCTION_MM` to 12 (a wide bar
+  gives at most 9 mm of both-black, an 18 mm line about 18); the cost is
+  less tolerance to the approach angle (about 13° instead of 29°) and a
+  junction reported 8 mm later (see `line_cfg.h`).
 - **Line lost**: no black on either sensor for 2 s → `EV_LINE_LOST [side
   last seen]` (for the record; the steering rule makes the decision).
 
@@ -555,7 +617,7 @@ pair, merged edges, a single bar ignored, too many edges, command table),
 changes, wide/narrow ratio 2.25, a misread element rejected — never a wrong
 character, bad count, equal widths). Simulator: ovals (left, right, tight, fast,
 slow), every barcode at speed, a barcode laid backwards, a 60 mm gap.
-On target: S3-U01…U07. Manual: S3-M01…M04 (sensor levels, thresholds,
+On target: S3-U01…U08 (U08: GP6, GP7, GP27 are plain GPIO, I2C1 off). Manual: S3-M01…M04 (sensor levels, thresholds,
 barcode reads at three speeds, junction and turn).
 
 ---
@@ -625,8 +687,16 @@ uncalibrated heading (a cross-check only).
 
 Read failures: 5 in a row → `FLT_IMU` (if `IMU_REQUIRED` = 1).
 
+Thresholds and sample counts (asked for in the design-review feedback):
+calibration 100 samples (1 s); filter 1/8 per sample (about 80 ms);
+CLIMBING above +3°, DESCENDING below −3°, LEVEL again within ±1.5°, counted
+only after 20 mm of travel; impact = a jump over 1,500 mg plus the speed
+halving within 150 ms.
+
 Routing (`task_imu.c`): VC gets terrain, humps and impacts (not the motion
-class); Telemetry gets everything.
+class); Telemetry gets everything. An impact must reach VC (a safety
+event); a terrain change dropped from a full `vc_event_q` is sent again on
+the next 10 ms cycle.
 
 ### 4.4 Safety Monitor (`safety_core.c`, `task_safety.c`)
 
@@ -634,6 +704,15 @@ class); Telemetry gets everything.
 `FLT_IMU 0x04`, `FLT_IMPACT 0x08`, `FLT_SCAN 0x10`, `FLT_QUEUE_OVF 0x20`,
 `FLT_HEALTH 0x40`, `FLT_NAV 0x80`. Any task reports a fault with
 `tk_set_flg(fault_flags, FLT_...)` — it never stops the motors itself.
+
+**Fault table** (design-review feedback: separate true safety faults from
+retryable mission failures; full table at the top of `safety_core.h`):
+
+| Kind | Examples | Result | Leave with |
+|---|---|---|---|
+| safety fault (a bit above) | stall, wheel against its duty, collision, IMU or sonar silent, a task stopped, a safety event lost, wheels not stopping | `FAULT_STOP` latched, SAFE_STOP | RESTART, then START |
+| mission failure (no bit) | line not found, no way round, no profile after a rescan, obstacle during a bypass, command or bypass too slow | `CMD_STOP`, HALTED + reason | START |
+| counted only | barcode capture lost to a buffer overflow, non-safety event dropped | carries on | — |
 
 The task waits on `fault_flags` with a 20 ms timeout:
 
@@ -649,6 +728,9 @@ The task waits on `fault_flags` with a 20 ms timeout:
   every periodic task stamps its slot each cycle (`health_stamp()`); a stamp
   older than its limit (Motion 100 ms, Line 50 ms, IMU 250 ms, Scan
   250 ms, VC 200 ms) raises `FLT_HEALTH`.
+
+Each pass records its run time (`app_task_time`), the fault path
+(fault bit → `FAULT_STOP`) included.
 
 One subtle point (`sm_wait_pattern`): while latched, the fault bits stay
 set until the restart clears them, so waiting for them would return
@@ -671,7 +753,8 @@ reads) and `SM-01…05` (button debounce, START, a silent task raises
 `FLT_HEALTH` once, START while faulted = RESTART). The latch and restart
 rules are checked on the target (S4-U03…U06) and in the simulator, which
 also runs two humps of 12 and 25 mm, an IMU that goes silent and a
-hidden-box collision. On target: S4-U01…U08. Manual: S4-M01…M05 (axes and signs, hump heights,
+hidden-box collision. On target: S4-U01…U09 (U09: I2C0 is on GP4/GP5, not on the Motor 1
+pins). Manual: S4-M01…M05 (axes and signs, hump heights,
 impact threshold, buttons, task health).
 
 ---
@@ -723,7 +806,10 @@ request.
   `EV_RANGE_ZONE` near/far when the range crosses 450 mm (back to far above
   500 mm) — VC slows down; `EV_ALERT [range]` after **2 readings in a
   row** closer than `stop_mm` (250 mm; 120 mm during a bypass). One ALERT
-  per request.
+  per request. If the request carries `SCAN_STOP_FLAG` (VC sets it on every
+  WATCH except while deliberately passing an obstacle after Continue), the
+  task **sets `CMD_STOP` itself** before it sends the ALERT, so the stop does
+  not wait for `vc_event_q` or VC (design-review feedback).
 - **PROFILE** (car stopped):
   1. *coarse*: 30°, 60°, 90°, 120°, 150°;
   2. *fine*: find the nearest coarse hit **inside the car's path**
@@ -734,7 +820,8 @@ request.
   3. each angle gets up to 3 pings; no echo after that is stored as
      **unknown**;
   4. build the profile (below), send `EV_PROFILE [valid, id]`, centre the
-     servo, go IDLE. Over 8 s → `FLT_SCAN` and an invalid profile.
+     servo, go IDLE. Over 8 s → an invalid profile (VC backs off and scans
+     again; not a fault).
 
 Ten pings in a row with no response at all → `FLT_SCAN` (sensor dead).
 
@@ -778,16 +865,21 @@ Two habits keep it robust:
   replaced quickly without flooding Motion Control.
 
 States: `STARTUP, READY, FOLLOW, EXEC, SEARCH, WAIT_ACK, SCANNING, BYPASS,
-REVERSE, FIND_LINE, ALIGN, SAFE_STOP, FINISHED`.
+REVERSE, FIND_LINE, ALIGN, SAFE_STOP, FINISHED, HALTED`.
+
+The task also logs the inbox's peak backlog (`vq_high`, with
+`tk_ref_mbf`) and its own run time; a hold carries the time of the line
+reading behind it (`steer_src_ms`).
 
 ### 5.6 Vehicle Controller — what it does
 
 **Start-up and commands.** STARTUP → READY when the IMU has calibrated
 (or after 3 s). START (from READY/FINISHED, no fault): clear `CMD_STOP`,
-copy the SET values, WATCH, FOLLOW. STOP while running → READY (motors
-held). RESTART → asks Safety Monitor to clear the faults; READY when
-`EV_FAULT_CLEAR` arrives. FINISH → FINISHED with `NAV_FINISH [distance]`
-(Telemetry adds the summary).
+copy the SET values, WATCH, FOLLOW. START from HALTED carries on with the
+same run (counters kept). STOP while running → READY (motors held).
+RESTART → asks Safety Monitor to clear the faults; READY when
+`EV_FAULT_CLEAR` arrives (from HALTED: straight to READY). FINISH →
+FINISHED with `NAV_FINISH [distance]` (Telemetry adds the summary).
 
 **FOLLOW.** On every line-status change and every tick, run Buddy 3's
 steering rule and send the wheel speeds. Speed: 200 mm/s; 120 if the
@@ -823,30 +915,32 @@ Safe Stop (`why` 6). Whole search limit 8 s.
 
 **Obstacle (Figure 7 of the design).**
 
-1. `EV_ALERT` in FOLLOW or EXEC → `motion_stop()`, scan IDLE, **WAIT_ACK**
+1. `EV_ALERT` in FOLLOW or EXEC (Obstacle Scan has already set
+   `CMD_STOP`) → `motion_stop()` again (harmless), scan IDLE, **WAIT_ACK**
    (1.5 s limit). A barcode command still waiting for its junction is
    dropped: after a detour the car cannot be sure which junction it meant.
 2. `EV_STOP_ACK` (wheels stopped) → PROFILE request, **SCANNING** (10 s
-   limit).
+   limit; on the first timeout it scans once more).
 3. `EV_PROFILE` → **decide** (corridor = 80 + 50 = 130 mm each side of the
    line; needed clearance = car width + margin = 210 mm):
    - no valid profile → **Reverse and Retry**;
    - the object lies entirely outside the corridor → **Continue**
-     (ALERTs are ignored until the car is past it);
+     (ALERTs are ignored, and the WATCH has no stop flag, until the car is
+     past it; then the stop flag is set again);
    - otherwise compute the sideways shift needed to pass on each side
      (left: 130 − x_left; right: 130 + x_right). Pass on a side only if its
      clearance ≥ 210 mm. Both possible: the **smaller shift** (less
      deviation from the route); within 20 mm of each other: the side with
      fewer unknown readings, then the preferred side (left);
    - no side possible → **Reverse and Retry**: back 150 mm, stop, scan
-     again; after 2 retries → Safe Stop (`why` 5).
+     again; after 2 retries → HALTED (`why` 5).
 4. **BYPASS** — a plan of five steps, each waiting for its `EV_DONE`:
    turn 45° out → drive `d1 = shift / sin 45°` → turn 45° back (parallel to
    the line) → drive `d2` = enough for the axle to clear the far side of the
    obstacle (closest distance + sensor-to-axle + assumed depth 150 + rear
    clearance − what leg 1 already gained) → turn 45° back toward the line.
-   The ultrasonic watches at 120 mm during every drive; an ALERT there →
-   Safe Stop (`why` 7).
+   The ultrasonic watches at 120 mm during every drive (stop flag set); an
+   ALERT there → HALTED (`why` 7).
 5. **FIND_LINE**: drive toward the line (`d1` + 150 mm) slowly. Black →
    **ALIGN**: drive 70 mm more (sensors to axle + 10) so the axle is on the
    line, turn 45° back to the line's heading, follow again (`NAV_REJOINED`).
@@ -854,11 +948,13 @@ Safe Stop (`why` 6). Whole search limit 8 s.
    line should be on.
    The whole obstacle episode is limited to 20 s.
 
-**Safe Stop.** On `EV_FAULT`, an impact, or any of the limits above: stop,
-scan IDLE, raise `FLT_NAV` (for its own reasons, so Safety Monitor latches
-it too), record `why`: 1 fault, 2 impact, 3 stop not acknowledged, 4 no
-scan result, 5 no way round, 6 line not found, 7 blocked during a bypass,
-8 command too slow, 9 bypass too slow. Leave with RESTART, then START.
+**Safe Stop and Halted.** A **safety** reason → SAFE_STOP: `why` 1 fault,
+2 impact, 3 stop not acknowledged (VC raises `FLT_NAV` for 3, so Safety
+Monitor latches it). Leave with RESTART, then START. A **mission failure**
+→ HALTED: stop with `CMD_STOP`, scan IDLE, nothing latched, `why` 4 no scan
+result (after a rescan), 5 no way round, 6 line not found, 7 blocked during
+a bypass, 8 command too slow, 9 bypass too slow. Leave with START (or
+RESTART → READY).
 
 Every state change (`EV_STATE [state, why]`) and decision (`EV_NAV`:
 pending, exec, continue, bypass ± shift, reverse, rejoined, search, found,
@@ -876,14 +972,17 @@ finish, refused) goes to Telemetry and is printed on the console.
 
 Host: `OP-01…05` (a box is never narrower than it is, missing echoes
 are unknown, a wall beside the path, a missing echo inside the box, no
-readings = no profile), `SC-01…07` (pings 70 ms apart, one ALERT, the box
+readings = no profile), `SC-01…09` (pings 70 ms apart, one ALERT, the box
 found, coarse then fine angles, time limit, servo back to the front, sensor
-fault), `VC-01…21` (START refused before the sensors are ready, START,
-barcode then junction → axle onto the junction → turn → follow, a DONE with
-the wrong id ignored, STOP, faults, RESTART, every Continue / Bypass /
-Reverse decision, scan timeout). Simulator: obstacle in the middle, sticking
-out right, with a wall on the left; dead end (search fails → Safe Stop →
-RESTART → START). On target: S5-U01…U06. Manual: S5-M01…M05 (ECHO
+fault, the stop flag stops the car with the ALERT and not without it),
+`VC-01…24` (START refused before the sensors are ready, START, barcode then
+junction → axle onto the junction → turn → follow, a DONE with the wrong id
+ignored, STOP, faults, RESTART, every Continue / Bypass / Reverse decision,
+no way round → HALTED, scan timeout → rescan → HALTED, START after HALTED,
+the WATCH stop flag around a Continue, a hold carries its line reading's
+time). Simulator: obstacle in the middle, sticking out right, with a wall
+on the left; dead end (search fails → HALTED → START carries on). On
+target: S5-U01…U07 (U07: GP0/GP1 are plain GPIO, UART0 not on them). Manual: S5-M01…M05 (ECHO
 voltage, range accuracy, servo calibration, profile of a known box, bypass
 and rejoin).
 
@@ -894,9 +993,9 @@ and rejoin).
 | Check | Command | What it proves |
 |---|---|---|
 | Firmware build, every variant | `cd build_make; make`, `make TEST=1`, `make NET=lwip MQTT=1`, `make SMP=0`, `make CONSOLE=uart WIFI=none`, `make CRASH_REPORT=1` | compiles with zero warnings for the RP2040 |
-| Host unit tests | `cd testing/host; make` → `./unit_tests` | 111 checks of every logic module, built with strict warnings and the address / undefined-behaviour sanitizers |
-| Closed-loop simulator | `./sim` (or `./sim -v <scenario>`) | the real logic of all five subsystems driving a simulated car through 20 scenarios (99 checks) |
-| Robustness | `python3 sweep.py 11 24` (or one car: `./sim -p <seed> <deadband> <kff> <track> <counts/mm> <right wheel>`) | the same scenarios on cars whose real motor, track width and encoder scale differ from the configured values; last run: 48 random cars, all 99 checks passed on every one |
+| Host unit tests | `cd testing/host; make` → `./unit_tests` | 120 checks of every logic module, built with strict warnings and the address / undefined-behaviour sanitizers |
+| Closed-loop simulator | `./sim` (or `./sim -v <scenario>`) | the real logic of all five subsystems driving a simulated car through 20 scenarios (98 checks) |
+| Robustness | `python3 sweep.py 11 24` (or one car: `./sim -p <seed> <deadband> <kff> <track> <counts/mm> <right wheel>`) | the same scenarios on cars whose real motor, track width and encoder scale differ from the configured values; last run (15 Oct, after the design-review changes): 48 random cars, all 98 checks passed on every one |
 | On target | `make TEST=1`, flash, read the console | the `S*-U*` checks on the real board, while the system runs |
 
 Saved results: `testing/host/logs/`. The manual tests for the real car

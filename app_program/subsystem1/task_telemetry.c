@@ -6,7 +6,10 @@
  *	  - validates commands (cmd_parse.c) and forwards accepted ones to
  *	    Vehicle Controller; SET values go into param_store;
  *	  - turns records from telemetry_q into event messages;
- *	  - every 500 ms formats telemetry and every 1 s a heartbeat.
+ *	  - every 500 ms formats telemetry and every 1 s a heartbeat;
+ *	  - every 5 s a "tim" event: task run times, missed releases, GPIO
+ *	    interrupt load, vc_event_q backlog and drops, steering and stop
+ *	    latency, stopping distance, reconnect time (feedback IS32).
  *	Messages go to mqtt_tx_mbf for the kernel's MQTT code to publish
  *	(MQTT=1 builds), or to the USB console (other builds).  It never
  *	calls cyw43, lwIP or MQTT functions; cyw43_utk_get_status() is the
@@ -23,6 +26,7 @@
 #include "../subsystem3/subsystem3.h"	/* lb_get_status() */
 #include "../subsystem4/subsystem4.h"	/* imu_get_status(), safety_latched_bits() */
 #include "../subsystem5/subsystem5.h"	/* vc_event_q, vc_get_status(), scan_*() */
+#include "../gpio_irq.h"		/* gpio_irq_calls, gpio_irq_max_us */
 
 #define TEL_RX_TMO_MS		100
 
@@ -35,6 +39,7 @@
 #define HB_PERIOD_MS		5000U	/* ... less often, so other prints stay readable */
 #define TEL_ECHO		1
 #endif
+#define TIM_PERIOD_MS		5000U	/* timing message ("tim" event) */
 
 LOCAL W		s_params[CMD_NPARAMS] = {
 	PARAM_UNSET, PARAM_UNSET, PARAM_UNSET, PARAM_UNSET, PARAM_UNSET, PARAM_UNSET
@@ -138,15 +143,16 @@ LOCAL void handle_command(const UB *text, INT len)
 
 	vc_get_status(&vc);
 	r = cmd_parse((const char *)text, (uint32_t)len, &s_last_seq,
-		      (vc.state == (W)VC_READY) || (vc.state == (W)VC_FINISHED), &c);
+		      (vc.state == (W)VC_READY) || (vc.state == (W)VC_FINISHED) ||
+		      (vc.state == (W)VC_HALTED), &c);
 	if (r == CMD_OK) {
 		if (c.verb == CMD_VERB_SET) {
 			s_params[c.param] = c.value;
 			tm_printf((UB*)"[TEL] SET %s = %d (used from the next START)\n",
 				  (const UB*)cmd_params[c.param].name, c.value);
-		} else if (app_send(vc_event_q, (UB)SRC_TELEMETRY, &s_seq, (UB)EV_COMMAND,
-				    c.verb, c.value) != E_OK) {
-			(void)tk_set_flg(fault_flags, FLT_QUEUE_OVF);
+		} else if (app_send_event(vc_event_q, (UB)SRC_TELEMETRY, &s_seq, (UB)EV_COMMAND,
+					  c.verb, c.value, NULL) != E_OK) {
+			(void)tk_set_flg(fault_flags, FLT_QUEUE_OVF);	/* a command is a safety event */
 		} else {
 			/* forwarded */
 		}
@@ -201,13 +207,46 @@ LOCAL void take_record(const APP_MSG *m)
 	}
 }
 
+/* Every TIM_PERIOD_MS: the timing and queue-health measurements */
+LOCAL void timing_message(UW period_ms)
+{
+	static UW	last_irq = 0U;
+	TEL_TIMING	tm;
+	APP_TIMING	at;
+	MC_SNAPSHOT	snap = {0};
+	VC_STATUS	vc;
+	char		json[NET_PAYLOAD_MAX];
+	UW		irq = gpio_irq_calls;
+	UW		i, ov = 0U;
+
+	app_timing_get(&at);
+	(void)motion_get_snapshot(&snap);
+	vc_get_status(&vc);
+	tm.t_ms = app_ms();
+	for (i = 0U; i < TEL_TIM_TASKS; i++) {
+		tm.max_us[i] = at.max_us[i];
+		ov += at.overruns[i];
+	}
+	tm.overruns = ov;
+	tm.irq_per_s = ((irq - last_irq) * 1000U) / period_ms;
+	last_irq = irq;
+	tm.irq_max_us = gpio_irq_max_us;
+	tm.vq_high = vc.vq_high;
+	tm.dropped = app_dropped();
+	tm.steer_lat_max_ms = snap.steer_lat_max_ms;
+	tm.stop_lat_max_us = snap.stop_lat_max_us;
+	tm.stop_dist_mm = snap.stop_dist_mm;
+	tm.reconnect_ms = net_reconnect_ms;
+	publish((UB)TOPIC_EVENT, json, tel_fmt_timing(&tm, json, NET_PAYLOAD_MAX));
+}
+
 EXPORT void telemetry_task(INT stacd, void *exinf)
 {
 	UB		rx[NET_CMD_MAX + 1U];
 	char		json[NET_PAYLOAD_MAX];
 	APP_MSG		m;
 	TEL_DATA	d;
-	UW		last_tel = 0U, last_hb = 0U, now;
+	UW		last_tel = 0U, last_hb = 0U, last_tim = 0U, now;
 	INT		len;
 	W		n;
 
@@ -216,7 +255,10 @@ EXPORT void telemetry_task(INT stacd, void *exinf)
 
 	while (1) {
 		/* 1. Commands: wait up to 100 ms */
+		UW	t0;
+
 		len = tk_rcv_mbf(mqtt_rx_mbf, rx, TEL_RX_TMO_MS);
+		t0 = app_us();
 		if (len > 0) {
 			handle_command(rx, len);
 		}
@@ -240,5 +282,10 @@ EXPORT void telemetry_task(INT stacd, void *exinf)
 			n = tel_fmt_status(&d, json, NET_PAYLOAD_MAX);
 			publish((UB)TOPIC_STATUS, json, n);
 		}
+		if ((now - last_tim) >= TIM_PERIOD_MS) {
+			timing_message(now - last_tim);
+			last_tim = now;
+		}
+		app_task_time(TIM_TELEMETRY, t0);
 	}
 }

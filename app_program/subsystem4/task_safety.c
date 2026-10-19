@@ -74,7 +74,7 @@ LOCAL void apply(const SM_OUT *out)
 		(void)tk_set_flg(fault_flags, out->raise);
 		tm_printf((UB*)"[SM] a task stopped running (health)\n");
 	}
-	if (app_send_list(vc_event_q, (UB)SRC_SAFETY, &s_seq, &out->ev) != E_OK) {
+	if (app_send_events(vc_event_q, (UB)SRC_SAFETY, &s_seq, &out->ev, NULL) != E_OK) {
 		/* Vehicle Controller's inbox is full.  The motors are already
 		   stopped by FAULT_STOP; record the overflow as well. */
 		(void)tk_set_flg(fault_flags, FLT_QUEUE_OVF);
@@ -100,10 +100,14 @@ EXPORT void safety_task(INT stacd, void *exinf)
 		UINT	i;
 		ER	er;
 
+		UW	t0;
+
 		er = tk_wai_flg(fault_flags, sm_wait_pattern(&s_sm), TWF_ORW, &ptn, SM_PERIOD_MS);
+		t0 = app_us();
 		if (er == E_OK) {
 			sm_on_flags(&s_sm, ptn, &out);
 			apply(&out);
+			app_task_time(TIM_SAFETY, t0);	/* fault -> FAULT_STOP path */
 			if ((ptn & FLT_ALL) != 0U) {
 				tm_printf((UB*)"[SM] fault bits 0x%02x\n", ptn & FLT_ALL);
 			}
@@ -121,5 +125,6 @@ EXPORT void safety_task(INT stacd, void *exinf)
 		sm_on_poll(&s_sm, gpio_get_val(SM_BTN_START_PIN), gpio_get_val(SM_BTN_STOP_PIN),
 			   age, alive, &out);
 		apply(&out);
+		app_task_time(TIM_SAFETY, t0);
 	}
 }

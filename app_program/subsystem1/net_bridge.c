@@ -27,6 +27,8 @@ EXPORT volatile UW	net_rx_drops;
 EXPORT volatile UW	net_errors;
 EXPORT volatile UW	net_connects;
 EXPORT volatile BOOL	net_up;
+EXPORT volatile UW	net_reconnect_ms;	/* NFR: reconnect time, measured */
+LOCAL UW		s_down_ms;		/* when the connection was lost, 0 = up */
 
 EXPORT const char *net_topic_name(UINT topic)
 {
@@ -69,13 +71,24 @@ void net_bridge_dropped(void)
 	net_errors++;
 }
 
-/* MQTT connection state changes */
+/* MQTT connection state changes.  Also measures the reconnect time: from
+   the moment the connection was lost to the moment it is back (WiFi
+   re-join every 5 s and broker retry every 3 s in the kernel's code). */
 void net_bridge_link(int connected)
 {
+	UW now = app_ms() | 1U;		/* 0 means "not lost" */
+
 	if (connected != 0) {
 		net_connects++;
 		net_up = TRUE;
+		if (s_down_ms != 0U) {
+			net_reconnect_ms = now - s_down_ms;
+			s_down_ms = 0U;
+		}
 	} else {
+		if (net_up) {
+			s_down_ms = now;
+		}
 		net_up = FALSE;
 	}
 }

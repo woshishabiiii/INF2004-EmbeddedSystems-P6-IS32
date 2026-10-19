@@ -23,9 +23,16 @@
 #define SCAN_IDLE		0U	/* no pings, servo centred */
 #define SCAN_WATCH		1U	/* face forward, ping, ALERT when close */
 #define SCAN_PROFILE		2U	/* coarse + fine scan, then PROFILE */
+#define SCAN_MODE_MASK		0x0FU
+/* WATCH flag: on a confirmed close range, Obstacle Scan sets CMD_STOP
+   itself (motion_stop) before it sends the ALERT, so the stop does not
+   wait for vc_event_q or the Vehicle Controller (design-review feedback
+   IS32).  Vehicle Controller leaves it off only while it deliberately
+   drives past an obstacle it has decided to pass (Continue). */
+#define SCAN_STOP_FLAG		0x10U
 
 typedef struct {
-	uint32_t	mode;		/* SCAN_... */
+	uint32_t	mode;		/* SCAN_..., plus SCAN_STOP_FLAG for WATCH */
 	int32_t		stop_mm;	/* WATCH: ALERT closer than this (0 = default) */
 	int32_t		id;		/* echoed in ALERT / RANGE_ZONE / PROFILE */
 } SCAN_REQ;
@@ -66,7 +73,8 @@ typedef struct {
 typedef struct {
 	int32_t		servo_deg;	/* command the servo to this angle */
 	bool		trigger;	/* fire a ping now */
-	bool		fault;		/* sensor not answering or profile too slow */
+	bool		fault;		/* sensor not answering (the car is blind) */
+	bool		stop_motors;	/* confirmed ALERT with SCAN_STOP_FLAG: set CMD_STOP now */
 	bool		profile_ready;	/* scan_core.profile holds a new result */
 	EVT_LIST	ev;		/* EV_ALERT, EV_RANGE_ZONE, EV_PROFILE */
 } SCAN_OUT;

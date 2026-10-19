@@ -27,7 +27,7 @@
 /* Wiring fix-ups: set to -1 if a wheel turns BACKWARDS for a positive
    duty, instead of swapping the motor wires. */
 #define MOTOR_DIR_LEFT		(1)	/* MEASURE */
-#define MOTOR_DIR_RIGHT		(1)	/* MEASURE */
+#define MOTOR_DIR_RIGHT		(-1)	/* MEASURE */
 
 typedef struct {
 	UINT	pin_a;

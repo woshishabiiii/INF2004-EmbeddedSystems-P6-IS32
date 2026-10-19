@@ -132,3 +132,9 @@ EXPORT ER gpio_irq_start(void)
 	s_started = TRUE;
 	return E_OK;
 }
+
+EXPORT UW gpio_funcsel(UINT pin)
+{
+	/* GPIOn_CTRL is at IO_BANK0 + 8 n + 4; FUNCSEL is bits 4:0 */
+	return (pin < GPIO_NUM) ? (in_w(IO_BANK0_BASE + (8U * (UW)pin) + 4U) & 0x1FU) : 0x1FU;
+}

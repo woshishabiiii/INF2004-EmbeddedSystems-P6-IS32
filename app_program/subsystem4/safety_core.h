@@ -21,15 +21,32 @@
 #include <stdbool.h>
 #include "../app_evt.h"
 
-/* fault_flags bits.  Any task sets ITS OWN bit with tk_set_flg(). */
-#define FLT_MOTION		0x0001U	/* stall, move timeout, encoder direction */
-#define FLT_LINE		0x0002U	/* barcode interrupt set-up, edge_buf overflow */
-#define FLT_IMU			0x0004U	/* IMU not answering */
+/* Fault table (design-review feedback IS32: separate true safety faults
+ * from retryable mission failures).
+ *
+ * SAFETY FAULTS: a bit below.  Safety Monitor latches FAULT_STOP (motors
+ * off) and only a RESTART, after every bit has stayed clear for 100 ms,
+ * releases it.  Vehicle Controller shows SAFE_STOP.
+ *
+ * MISSION FAILURES: no fault bit.  Vehicle Controller stops the car with
+ * CMD_STOP, shows HALTED with the reason (VC_WHY_... in vc_core.h) and
+ * START carries on: line not found, no way round after the retries, no
+ * obstacle profile after a rescan, obstacle during a bypass, a barcode
+ * command or a bypass taking too long.
+ *
+ * COUNTED ONLY (the car carries on): a barcode capture lost to an
+ * edge_buf overflow (EV_BARCODE_BAD), a non-safety event dropped from
+ * vc_event_q (evt_is_safety()), a telemetry record or message dropped.
+ *
+ * Any task sets ITS OWN bit with tk_set_flg(). */
+#define FLT_MOTION		0x0001U	/* stall, move timeout, wheel turning against its duty */
+#define FLT_LINE		0x0002U	/* barcode interrupt could not be set up (start-up) */
+#define FLT_IMU			0x0004U	/* IMU not answering (IMU_REQUIRED) */
 #define FLT_IMPACT		0x0008U	/* collision detected */
-#define FLT_SCAN		0x0010U	/* ultrasonic not answering, profile timeout */
-#define FLT_QUEUE_OVF		0x0020U	/* a send to vc_event_q failed */
+#define FLT_SCAN		0x0010U	/* ultrasonic not answering: the car is blind */
+#define FLT_QUEUE_OVF		0x0020U	/* a SAFETY event or a motion command could not be queued */
 #define FLT_HEALTH		0x0040U	/* a task stopped stamping task_health */
-#define FLT_NAV			0x0080U	/* Vehicle Controller: search, retry or stop-ack limit */
+#define FLT_NAV			0x0080U	/* Vehicle Controller: wheels did not stop after CMD_STOP */
 #define FLT_ALL			0x00FFU
 #define FLT_RESTART_REQ		0x8000U	/* not a fault: a RESTART was requested */
 

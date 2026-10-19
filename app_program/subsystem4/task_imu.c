@@ -20,6 +20,7 @@ LOCAL IMU_CORE		s_imu;
 LOCAL IMU_STATUS	s_status;
 LOCAL UH		s_seq_vc;
 LOCAL UH		s_seq_tel;
+LOCAL BOOL		s_terrain_resend;	/* a terrain change was dropped: send it again */
 
 LOCAL const IMU_PARAMS s_params = {
 	IMU_AXIS_FWD,		/* axis_fwd */
@@ -79,8 +80,17 @@ LOCAL void route_events(const EVT_LIST *ev)
 		/* Vehicle Controller needs the terrain (slow down, ignore the
 		   line on a hump) and collisions, but not the motion class */
 		if ((m->type != EV_MOTION) && ((m->type != EV_IMPACT) || (IMU_IMPACT_STOPS != 0))) {
-			if (app_send(vc_event_q, (UB)SRC_IMU, &s_seq_vc, m->type, m->p1, m->p2) != E_OK) {
+			BOOL dropped = FALSE;
+
+			/* An impact must arrive (safety event); terrain and humps are
+			   dropped and counted if the inbox is full, and a lost
+			   terrain change is sent again next cycle (evt_is_safety()) */
+			if (app_send_event(vc_event_q, (UB)SRC_IMU, &s_seq_vc, m->type, m->p1, m->p2,
+					   &dropped) != E_OK) {
 				(void)tk_set_flg(fault_flags, FLT_QUEUE_OVF);
+			}
+			if (dropped && (m->type == (UB)EV_TERRAIN)) {
+				s_terrain_resend = TRUE;
 			}
 		}
 		/* telemetry is best effort: a full queue just drops the record */
@@ -125,10 +135,16 @@ EXPORT void imu_task(INT stacd, void *exinf)
 	imu_core_init(&s_imu, &s_params);
 
 	while (1) {
-		BOOL ok;
+		BOOL	ok;
+		UW	t0;
+		INT	missed;
 
 		(void)tk_slp_tsk(TMO_FEVR);
-		(void)tk_can_wup(TSK_SELF);	/* never "catch up" after a delay */
+		t0 = app_us();
+		missed = tk_can_wup(TSK_SELF);	/* never "catch up" after a delay */
+		if (missed > 0) {
+			app_task_overrun(TIM_IMU, (UW)missed);
+		}
 		health_stamp(HEALTH_IMU);
 
 		ok = (lsm_accel_read(&a[0], &a[1], &a[2]) == E_OK) ? TRUE : FALSE;
@@ -145,6 +161,14 @@ EXPORT void imu_task(INT stacd, void *exinf)
 		}
 		if (out.impact && (IMU_IMPACT_STOPS != 0)) {
 			(void)tk_set_flg(fault_flags, FLT_IMPACT);
+		}
+		if (s_terrain_resend) {
+			BOOL dropped = FALSE;
+
+			s_terrain_resend = FALSE;
+			(void)app_send_event(vc_event_q, (UB)SRC_IMU, &s_seq_vc, (UB)EV_TERRAIN,
+					     s_imu.terrain, s_imu.pitch_cdeg, &dropped);
+			s_terrain_resend = dropped;
 		}
 		route_events(&out.ev);
 
@@ -174,5 +198,6 @@ EXPORT void imu_task(INT stacd, void *exinf)
 		s_status.max_hump_mm = s_imu.max_hump_mm;
 		s_status.humps = s_imu.humps;
 		s_status.g0_mg = s_imu.g0;
+		app_task_time(TIM_IMU, t0);
 	}
 }

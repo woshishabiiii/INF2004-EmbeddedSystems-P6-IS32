@@ -98,6 +98,7 @@ static void watch_step(SCAN_CORE *s, const SCAN_IN *in, int32_t echo, SCAN_OUT *
 		if ((s->close_n >= s->p.confirm) && !s->alert_sent) {
 			(void)evt_list_add(&out->ev, (uint8_t)EV_ALERT, r, s->req.id);
 			s->alert_sent = true;
+			out->stop_motors = ((s->req.mode & SCAN_STOP_FLAG) != 0U);
 		}
 	} else if (echo != SCAN_ECHO_NONE) {
 		s->last_range = -1;		/* no echo: nothing confirmed close */
@@ -202,8 +203,9 @@ static void finish_profile(SCAN_CORE *s, SCAN_OUT *out, bool timed_out)
 	}
 	os_build_profile(ang, rng, n, s->p.r_max_mm, s->p.corridor_mm, &s->profile);
 	if (timed_out) {
+		/* not a fault: an invalid profile makes Vehicle Controller back
+		   off and scan again (a retryable mission failure, IS32) */
 		s->profile.valid = false;
-		out->fault = true;
 	}
 	out->profile_ready = true;
 	(void)evt_list_add(&out->ev, (uint8_t)EV_PROFILE, s->profile.valid ? 1 : 0, s->req.id);
@@ -276,6 +278,7 @@ void scan_core_step(SCAN_CORE *s, const SCAN_IN *in, SCAN_OUT *out)
 
 	out->trigger = false;
 	out->fault = false;
+	out->stop_motors = false;
 	out->profile_ready = false;
 	evt_list_clear(&out->ev);
 
@@ -288,12 +291,12 @@ void scan_core_step(SCAN_CORE *s, const SCAN_IN *in, SCAN_OUT *out)
 		s->alert_sent = false;
 		s->zone_near = -1;
 		echo = SCAN_ECHO_NONE;		/* that ping belonged to the old request */
-		if (s->req.mode == SCAN_PROFILE) {
+		if ((s->req.mode & SCAN_MODE_MASK) == SCAN_PROFILE) {
 			start_profile(s, in->now_ms);
 		}
 	}
 
-	switch (s->req.mode) {
+	switch (s->req.mode & SCAN_MODE_MASK) {
 	case SCAN_WATCH:
 		watch_step(s, in, echo, out);
 		break;

@@ -7,8 +7,10 @@
  *
  *	Wake-ups:
  *	  - every 20 ms from the cyclic handler (s_tick = TRUE): full control step;
- *	  - at once from motion_stop() / motion_fault_stop(): stop bits only,
- *	    so a stop is acted on within microseconds, not at the next tick.
+ *	  - at once from motion_stop() / motion_fault_stop(): stop bits, so a
+ *	    stop is acted on within microseconds, not at the next tick;
+ *	  - at once from motion_hold_speed(): the new wheel speeds are applied
+ *	    straight away (steering does not wait for the tick).
  */
 
 #include "subsystem2.h"
@@ -108,9 +110,13 @@ EXPORT void motion_task(INT stacd, void *exinf)
 		T_RFLG	rflg;
 		UINT	flags = 0U;
 
-		(void)tk_slp_tsk(TMO_FEVR);
+		UW	t0;
+		UW	missed;
 
-		/* Inputs: stop bits on EVERY wake-up, commands only on a tick */
+		(void)tk_slp_tsk(TMO_FEVR);
+		t0 = app_us();
+
+		/* Inputs: stop bits and new commands on EVERY wake-up */
 		if (tk_ref_flg(stop_flags, &rflg) == E_OK) {
 			flags = rflg.flgptn;
 		}
@@ -121,15 +127,17 @@ EXPORT void motion_task(INT stacd, void *exinf)
 		in.cmd_stop = ((flags & MC_CMD_STOP) != 0U);
 		in.fault_stop = ((flags & MC_FAULT_STOP) != 0U);
 		in.stop_req_us = mc_stop_req_us;
-		in.tick = (s_ticks != seen_ticks);	/* a 20 ms release (not just a stop) */
+		missed = s_ticks - seen_ticks;
+		in.tick = (missed != 0U);		/* a 20 ms release (not just a wake-up) */
+		if (missed > 1U) {
+			app_task_overrun(TIM_MOTION, missed - 1U);	/* a tick came while busy */
+		}
 		seen_ticks = s_ticks;
 		in.ncmd = 0U;
 		in.cmd = cmds;
-		if (in.tick) {
-			while ((in.ncmd < 8U) &&
-			       (tk_rcv_mbf(motion_cmd_q, &cmds[in.ncmd], TMO_POL) == (INT)sizeof(MC_CMD))) {
-				in.ncmd++;
-			}
+		while ((in.ncmd < 8U) &&
+		       (tk_rcv_mbf(motion_cmd_q, &cmds[in.ncmd], TMO_POL) == (INT)sizeof(MC_CMD))) {
+			in.ncmd++;
 		}
 		if (was_cmd_stop && !in.cmd_stop && !in.fault_stop) {
 			load_params();			/* released at START */
@@ -160,7 +168,9 @@ EXPORT void motion_task(INT stacd, void *exinf)
 			tm_printf((UB*)"[MC] FAULT %d (1 stall, 2 timeout, 3 encoder direction)\n",
 				  s_core.snap.fault_code);
 		}
-		if (app_send_list(vc_event_q, (UB)SRC_MOTION, &s_seq, &out.ev) != E_OK) {
+		/* EV_STOP_ACK must arrive; a lost EV_DONE is covered by Vehicle
+		   Controller's time limits (evt_is_safety()) */
+		if (app_send_events(vc_event_q, (UB)SRC_MOTION, &s_seq, &out.ev, NULL) != E_OK) {
 			(void)tk_set_flg(fault_flags, FLT_QUEUE_OVF);
 		}
 
@@ -171,5 +181,6 @@ EXPORT void motion_task(INT stacd, void *exinf)
 			}
 			health_stamp(HEALTH_MOTION);
 		}
+		app_task_time(TIM_MOTION, t0);
 	}
 }

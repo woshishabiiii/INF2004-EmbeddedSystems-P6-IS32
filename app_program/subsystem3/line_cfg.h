@@ -17,8 +17,27 @@
 #define LB_BAR_LEVEL		1U	/* barcode sensor DO level over a bar       MEASURE */
 
 /* ---- Region A ----------------------------------------------------------- */
+/* JUNCTION versus a "both black" barcode band (design-review feedback IS32).
+   A junction is both line sensors on black for LB_JUNCTION_MS AND for
+   LB_JUNCTION_MM of travel (a car standing on black is not a junction).
+   The supplied course puts each barcode 20 mm BESIDE the line: with the
+   line sensors 25 mm apart (12.5 mm from the centre) and the bars starting
+   29 mm from the centre, the line sensors never see a bar (16.5 mm clear),
+   so no barcode band can look like a junction.  If a course ever puts a
+   band ACROSS the line, raise LB_JUNCTION_MM to 12: a wide bar gives at
+   most 9 mm of both-black travel, an 18 mm crossing line about 18 mm.
+   Cost: a crossing line met at an angle shows less both-black travel
+   (18 mm - 25 mm x tan(angle)), so 12 mm tolerates about 13 degrees of
+   approach angle where 4 mm tolerates about 29; and the junction is
+   reported 8 mm later, so VC_LINE_TO_AXLE_MM's move must shrink by 8 mm. */
 #define LB_JUNCTION_MS		10U	/* both black at least this long ...           TUNE */
 #define LB_JUNCTION_MM		4	/* ... and over this much travel (d_junction)  TUNE */
+/* T_lost: with two straddling sensors "both white" is either centred or
+   the start of a line loss.  The steering leans toward the side last seen
+   (LS_D_BIAS, growing after LS_T_DRIFT_MS) so a centred car touches an
+   edge well within T_lost; only then is the line lost.  At 200 mm/s,
+   2 s is 400 mm of travel: validate at the target speed and lower it if
+   the weave touches an edge reliably (feedback IS32). */
 #define LB_T_LOST_MS		2000U	/* no black seen for this long = line lost (T_lost)  TUNE */
 
 /* ---- barcode capture ----------------------------------------------------- */

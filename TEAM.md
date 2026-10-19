@@ -86,7 +86,7 @@ Shared configuration changed for this project (team agreement):
 | `config/config_device.h` | `DEVCNF_USE_IIC` 0 → **1** | IMU on I2C0 |
 | `device/i2c/sysdepend/rp2040/i2c_cnf_sysdep.h` | I2C0 SDA/SCL 8/9 → **4/5**, timeout 1000 → **20** ms | GP8/GP9 are Motor 1; a stuck bus must not block for 1 s |
 | `device/adc/sysdepend/rp2040/adc_cnf_sysdep.h` | `DEVCONF_ADC_PIN_INIT_0` → **TRUE** | barcode AO on GP26 |
-| `lib/liblwip/sysdepend/pico_rp2040/mqtt_utk.c` | telemetry bridge (IF-11) | agreed with the instructor; still runs only inside `cyw43_utk_task` |
+| `lib/liblwip/sysdepend/pico_rp2040/mqtt_utk.c` | telemetry bridge (IF-11) | to be agreed with the instructor (template rule for shared library code); still runs only inside `cyw43_utk_task` |
 | `app_program/app.h` | `TASK_STACK_SIZE` 2048 → **4096** | JSON buffers and scan arrays on the stack |
 
 ### WiFi and MQTT
@@ -123,22 +123,31 @@ The **provider** creates the kernel object and publishes its ID in its own
 
 | ID | From → To | Mechanism | Object ID name | Data / meaning | Agreed by |
 |---|---|---|---|---|---|
-| IF-01 | all → S5 Vehicle Controller | message buffer, 32 × 16 B (owned by S5) | `vc_event_q` | `APP_MSG` (`app_evt.h`), sent with `TMO_POL`; a failed send sets `FLT_QUEUE_OVF` | team |
-| IF-02 | S5 VC → S2 | message buffer, 8 × 16 B, wrapped by the motion API (owned by S2) | `motion_cmd_q` | `motion_move_forward/backward(mm, speed, id)`, `motion_turn_left/right(deg, id)`, `motion_hold_speed(l, r)`; `EV_DONE.p2` = id | team |
-| IF-03 | S5 VC, S4, S2 → S2 | event flag + `tk_wup_tsk` (owned by S2) | `stop_flags` | `MC_CMD_STOP` (VC), `MC_FAULT_STOP` (Safety Monitor, Motion Control); `motion_stop()`, `motion_fault_stop()` | team |
+| IF-01 | all → S5 Vehicle Controller | message buffer, 32 × 16 B (owned by S5) | `vc_event_q` | `APP_MSG` (`app_evt.h`), sent with `TMO_POL` through `app_send_event(s)`. If it is full: a **safety** event (`evt_is_safety()`: FAULT, FAULT_CLEAR, IMPACT, ALERT, STOP_ACK, BUTTON, COMMAND) sets `FLT_QUEUE_OVF`; any other event is dropped and counted, and a dropped line status or terrain change is sent again next cycle. Peak backlog logged (`vq` in the `tim` event) | team |
+| IF-02 | S5 VC → S2 | message buffer, 8 × 16 B, wrapped by the motion API (owned by S2) | `motion_cmd_q` | `motion_move_forward/backward(mm, speed, id)`, `motion_turn_left/right(deg, id)`, `motion_hold_speed(l, r, src_ms)`; a hold wakes Motion Control and is applied at once (`src_ms` = time of the line reading, for the latency log); `EV_DONE.p2` = id; `EV_STOP_ACK` = [latency µs, stopping distance mm] | team |
+| IF-03 | S5 VC, S5 Scan, S4, S2 → S2 | event flag + `tk_wup_tsk` (owned by S2) | `stop_flags` | `MC_CMD_STOP`: set by VC, or by Obstacle Scan itself on a confirmed close range (`SCAN_STOP_FLAG`); cleared only by VC. `MC_FAULT_STOP`: Safety Monitor, Motion Control; cleared only by Safety Monitor. `motion_stop()`, `motion_fault_stop()` | team |
 | IF-04 | all → S4 Safety Monitor | event flag (owned by S4) | `fault_flags` | one `FLT_...` bit per fault, `FLT_RESTART_REQ` (`safety_core.h`) | team |
 | IF-05 | S2 → S1, S3, S4, S5 | shared record + mutex `TA_INHERIT` (owned by S2) | `mtx_snapshot` | `MC_SNAPSHOT` via `motion_get_snapshot()`, 2 ms lock timeout | team |
-| IF-06 | S5 VC → S5 Obstacle Scan | message buffer, 4 × 12 B (owned by S5) | `scan_request_q` | `SCAN_REQ` {mode, stop distance, id} | S5 |
+| IF-06 | S5 VC → S5 Obstacle Scan | message buffer, 4 × 12 B (owned by S5) | `scan_request_q` | `SCAN_REQ` {mode (+ `SCAN_STOP_FLAG` for WATCH: Scan sets CMD_STOP on a confirmed ALERT), stop distance, id} | S5 |
 | IF-07 | S5, S4 → S1 | message buffer, 16 × 16 B (owned by S1) | `telemetry_q` | `APP_MSG` records; full = dropped (telemetry never delays control) | team |
-| IF-08 | S1 → S2, S5 | shared array, single writer (owned by S1) | `param_get()` | SET values, accepted only in READY / FINISHED, copied by owners at START | team |
+| IF-08 | S1 → S2, S5 | shared array, single writer (owned by S1) | `param_get()` | SET values, accepted only in READY / FINISHED / HALTED, copied by owners at START | team |
 | IF-09 | S2, S3, S4, S5 → S4 | shared array, one word per task (owned by S4) | `health_stamp()` | time of each task's last cycle | team |
 | IF-10 | S3 → S5 VC | function interface (pure C) | `ls_update/ls_output`, `lb_steer_params` | the line-following rule: line status → wheel speeds | S3, S5 |
-| IF-11 | S1 ↔ kernel `cyw43_utk_task` | 2 message buffers, `TMO_POL` on the kernel side (owned by S1) | `mqtt_tx_mbf`, `mqtt_rx_mbf` | 1-byte topic + JSON ≤ 200 B out; command text ≤ 64 B in (`net_bridge.c` + `mqtt_utk.c`) | team + instructor |
+| IF-11 | S1 ↔ kernel `cyw43_utk_task` | 2 message buffers, `TMO_POL` on the kernel side (owned by S1) | `mqtt_tx_mbf`, `mqtt_rx_mbf` | 1-byte topic + JSON ≤ 200 B out; command text ≤ 64 B in (`net_bridge.c` + `mqtt_utk.c`) | team; instructor to confirm |
 | IF-12 | S2, S3, S5 → shared | GPIO bank interrupt dispatcher | `gpio_irq_attach()` | per-pin edge callback with a 1 µs timestamp, runs on core 1 | team |
 | IF-13 | S2, S3, S4, S5 → S1 | status getters, single writer each | `lb_get_status`, `imu_get_status`, `vc_get_status`, `scan_get_status`, `scan_profile_get`, `safety_latched_bits` | latest values for telemetry | team |
+| IF-14 | every task → S1 | shared table, one writer per slot (`app_common.c`) | `app_task_time()`, `app_task_overrun()`, `app_timing_get()` | each task's longest run (µs) and missed releases, published every 5 s in the `tim` event | team |
 
 Each interface is tested by at least one integration test
 (`testing/integration/TEST_LOG.md`).
+
+### Faults and stops (fault table, design-review feedback IS32)
+
+| Kind | What | Result | Leave with |
+|---|---|---|---|
+| Safety fault (bit in `fault_flags`) | motor stall, move timeout, wheel turning against its duty (`FLT_MOTION`); collision (`FLT_IMPACT`); IMU not answering (`FLT_IMU`); ultrasonic not answering (`FLT_SCAN`); a safety event or motion command lost to a full queue (`FLT_QUEUE_OVF`); a task stopped running (`FLT_HEALTH`); wheels not stopping after CMD_STOP (`FLT_NAV`); barcode interrupt set-up failed at start-up (`FLT_LINE`) | Safety Monitor latches `FAULT_STOP`; VC `SAFE_STOP` | RESTART (bits clear for 100 ms), then START |
+| Mission failure (no fault bit) | line not found, no way round after 2 retries, no profile after a rescan, obstacle during a bypass, barcode command or bypass too slow | VC stops with `CMD_STOP`; `HALTED` with the reason | START (the run carries on) |
+| Counted only | barcode capture lost to an `edge_buf` overflow, non-safety event dropped from `vc_event_q`, telemetry dropped | the car carries on | — |
 
 ## 6. Kernel object budget
 

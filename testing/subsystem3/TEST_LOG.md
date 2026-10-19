@@ -22,6 +22,7 @@ Define a test here before running it. Test IDs never change.
 | S3-U05 | both black for 20 ms and 10 mm = junction | FR1 | auto | `subsystem3_test.c` | PASS |
 | S3-U06 | no black for T_lost = line lost | FR1 | auto | `subsystem3_test.c` | PASS |
 | S3-U07 | no barcode read while standing still | FR2 | auto | `subsystem3_test.c` | PASS |
+| S3-U08 | GP6, GP7, GP27 are plain GPIO on this kernel build (I2C1 not started) | A6 | auto | `subsystem3_test.c` | PASS |
 | S3-H01 | Code 39: all 43 characters both ways, 30 % speed change, misreads rejected: C39-01 … C39-07 | FR2 | host | `unit_tests.c` | all PASS |
 | S3-H02 | capture: chatter, merged edges, line crossings, too many edges: BC-01 … BC-06 | FR2, NFR1 | host | `unit_tests.c` | all PASS |
 | S3-H03 | line status, junction, line lost, steering rule: LC-01 … LC-04, LS-01 … LS-08 | FR1 | host | `unit_tests.c` | all PASS |
@@ -41,3 +42,4 @@ Add a new row for every run. Never edit or delete old rows.
 | Date | Test ID | Commit | Tester | Result | Log / evidence | Notes |
 |---|---|---|---|---|---|---|
 | 2026-10-14 | S3-H01 … | working tree | host | PASS | `testing/host/logs/2026-10-14_unit.txt` | laptop run of the logic modules; on-target rows to be added after flashing |
+| 2026-10-15 | S3-H01 … S3-H03 | working tree | host | PASS | `testing/host/logs/2026-10-15_unit.txt` | after the IS32 changes (logic unchanged; overflow and re-send are in task_line.c) |

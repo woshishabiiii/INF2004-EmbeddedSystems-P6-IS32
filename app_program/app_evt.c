@@ -27,3 +27,20 @@ bool evt_list_add(EVT_LIST *l, uint8_t type, int32_t p1, int32_t p2)
 	l->n++;
 	return true;
 }
+
+bool evt_is_safety(uint8_t type)
+{
+	switch (type) {
+	case EV_FAULT:
+	case EV_FAULT_CLEAR:
+	case EV_IMPACT:
+	case EV_ALERT:
+	case EV_STOP_ACK:
+	case EV_BUTTON:
+	case EV_COMMAND:
+		return true;
+	default:
+		return false;	/* line status, junctions, barcodes, DONE, profiles,
+				   terrain, humps, ...: drop and count */
+	}
+}

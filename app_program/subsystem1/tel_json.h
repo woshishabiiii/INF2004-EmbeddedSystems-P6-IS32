@@ -101,4 +101,27 @@ typedef struct {
 
 int32_t	tel_fmt_summary(const TEL_SUMMARY *s, char *buf, uint32_t cap);
 
+/* Timing and queue health, every 5 s on the event topic ("tim"): the
+   measurements asked for by the design-review feedback (IS32) -- task run
+   times against their deadlines, missed releases, the GPIO interrupt
+   load, vc_event_q's peak backlog and drops, steering and stop latency,
+   stopping distance and the MQTT reconnect time. */
+#define TEL_TIM_TASKS	7U	/* motion, line, vc, scan, imu, safety, telemetry */
+
+typedef struct {
+	uint32_t	t_ms;
+	uint32_t	max_us[TEL_TIM_TASKS];	/* longest run of each task, us */
+	uint32_t	overruns;	/* releases missed, all tasks */
+	uint32_t	irq_per_s;	/* GPIO interrupts per second, last period */
+	uint32_t	irq_max_us;	/* longest GPIO interrupt handler run */
+	uint32_t	vq_high;	/* most events waiting in vc_event_q */
+	uint32_t	dropped;	/* non-safety events dropped */
+	int32_t		steer_lat_max_ms;	/* line reading -> new wheel targets */
+	int32_t		stop_lat_max_us;	/* stop request -> duty 0 */
+	int32_t		stop_dist_mm;	/* last stop: CMD_STOP -> wheels stopped */
+	uint32_t	reconnect_ms;	/* last MQTT reconnect, 0 = none yet */
+} TEL_TIMING;
+
+int32_t	tel_fmt_timing(const TEL_TIMING *s, char *buf, uint32_t cap);
+
 #endif /* TEL_JSON_H */

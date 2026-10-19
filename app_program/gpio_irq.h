@@ -52,4 +52,12 @@ IMPORT ER gpio_irq_start(void);
 IMPORT volatile UW gpio_irq_calls;	/* handler entries */
 IMPORT volatile UW gpio_irq_max_us;	/* longest handler run, us */
 
+/* Function selected on a pin (IO_BANK0 GPIOn_CTRL.FUNCSEL): 5 = SIO
+   (plain GPIO), 2 = UART, 3 = I2C, 4 = PWM, 31 = none.  Used by the
+   on-target tests to confirm that the kernel build left our pins alone
+   (design-review feedback IS32: GP0/GP1, GP16, GP25). */
+#define GPIO_FUNC_I2C	3U
+#define GPIO_FUNC_SIO	5U
+IMPORT UW gpio_funcsel(UINT pin);
+
 #endif /* GPIO_IRQ_H */

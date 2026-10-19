@@ -23,6 +23,7 @@ Define a test here before running it. Test IDs never change.
 | S4-U06 | faults clear for 2 polls: latch released | FR7 | auto | `subsystem4_test.c` | PASS |
 | S4-U07 | IMU answers and has calibrated | FR4, A4 | auto | `subsystem4_test.c` (car still and level) | PASS |
 | S4-U08 | |g| at rest is 900..1100 mg | FR4 | auto | `subsystem4_test.c` | PASS |
+| S4-U09 | I2C0 is on GP4/GP5, not on the Motor 1 pins GP8/GP9, on this kernel build | A6 | auto | `subsystem4_test.c` | PASS |
 | S4-H01 | maths, calibration, braking is not a slope, hump height, collision vs bump, motion classes, read failures: IMU-01 … IMU-14 | FR4, FR7 | host | `unit_tests.c` | all PASS |
 | S4-H02 | buttons, health, START-as-RESTART: SM-01 … SM-05 | FR6, FR7 | host | `unit_tests.c` | all PASS |
 | S4-M01 | axes and signs | FR4 | manual | Car level: `up` ≈ +1000 mg. Nose up 20°: `forward` positive. Set `IMU_AXIS_*` / `IMU_SIGN_*`. | pitch `p` in telemetry ≈ +200 (tenths of a degree) |
@@ -42,3 +43,4 @@ Add a new row for every run. Never edit or delete old rows.
 | Date | Test ID | Commit | Tester | Result | Log / evidence | Notes |
 |---|---|---|---|---|---|---|
 | 2026-10-14 | S4-H01 … | working tree | host | PASS | `testing/host/logs/2026-10-14_unit.txt` | laptop run of the logic modules; on-target rows to be added after flashing |
+| 2026-10-15 | S4-H01, S4-H02 | working tree | host | PASS | `testing/host/logs/2026-10-15_unit.txt` | after the IS32 changes (fault table: mission failures no longer latch) |

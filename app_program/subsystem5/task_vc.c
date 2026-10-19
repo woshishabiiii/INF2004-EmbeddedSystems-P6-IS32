@@ -84,7 +84,7 @@ LOCAL void run_actions(const VC_ACTIONS *act)
 
 		switch (a->type) {
 		case VA_HOLD:
-			if (motion_hold_speed(a->a, a->b) != E_OK) {
+			if (motion_hold_speed(a->a, a->b, (UW)a->c) != E_OK) {
 				s_hold_drops++;		/* re-sent within VC_HOLD_REFRESH_MS */
 			}
 			break;
@@ -143,6 +143,20 @@ LOCAL void update_status(void)
 	s_status.run_start_odo = s_vc.run_start_odo;
 }
 
+/* Events still waiting in the inbox, plus the one just taken */
+LOCAL void log_backlog(void)
+{
+	T_RMBF	r;
+
+	if (tk_ref_mbf(vc_event_q, &r) == E_OK) {
+		UW waiting = VC_EVENT_SLOTS - ((UW)r.frbufsz / ((UW)sizeof(APP_MSG) + 4U)) + 1U;
+
+		if (waiting > s_status.vq_high) {
+			s_status.vq_high = waiting;
+		}
+	}
+}
+
 LOCAL BOOL sensors_ready(void)
 {
 	IMU_STATUS imu;
@@ -171,11 +185,15 @@ EXPORT void vc_task(INT stacd, void *exinf)
 		W	wait = (W)(next_tick - app_ms());
 		UW	now;
 
+		UW	t0;
+
 		len = tk_rcv_mbf(vc_event_q, &m, (wait > 0) ? (TMO)wait : TMO_POL);
+		t0 = app_us();
 		now = app_ms();
 		(void)motion_get_snapshot(&snap);	/* on failure: keep the last one */
 
 		if (len == (INT)sizeof(m)) {
+			log_backlog();
 			if (m.type == EV_PROFILE) {
 				scan_profile_get(&prof);
 				vc_profile(&s_vc, &m, &prof, now, snap.odo_mm, &act);
@@ -194,11 +212,13 @@ EXPORT void vc_task(INT stacd, void *exinf)
 			next_tick += (UW)VC_TICK_MS;
 			if ((W)(now - next_tick) >= 0) {
 				next_tick = now + (UW)VC_TICK_MS;	/* far behind: do not catch up */
+				app_task_overrun(TIM_VC, 1U);
 			}
 			vc_tick(&s_vc, now, snap.odo_mm, (sensors_ready() != FALSE), &act);
 			run_actions(&act);
 			health_stamp(HEALTH_VC);
 		}
 		update_status();
+		app_task_time(TIM_VC, t0);
 	}
 }

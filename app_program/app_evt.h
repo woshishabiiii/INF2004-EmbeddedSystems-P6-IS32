@@ -80,4 +80,13 @@ typedef struct {
 void	evt_list_clear(EVT_LIST *l);
 bool	evt_list_add(EVT_LIST *l, uint8_t type, int32_t p1, int32_t p2);	/* false if full */
 
+/* Queue-overflow policy for vc_event_q (design-review feedback IS32).
+   A SAFETY event must reach Vehicle Controller: if the queue is full the
+   sender raises FLT_QUEUE_OVF (Safe Stop).  Every other event only
+   informs the mission: if it does not fit it is dropped and counted, and
+   a newer event of the same kind (or the controller's own time limits)
+   covers the loss.  Safety events: FAULT, FAULT_CLEAR, IMPACT, ALERT,
+   STOP_ACK, BUTTON, COMMAND. */
+bool	evt_is_safety(uint8_t type);
+
 #endif /* APP_EVT_H */

@@ -320,7 +320,8 @@ static void test_motion(void)
 	MC_CMD	cmd;
 	MC_IN	in;
 	int	i, done = 0, ack = 0, fault = 0;
-	int32_t	first_target;
+	int32_t	first_target, integ, stop_mm;
+	uint32_t k;
 
 	/* distance move */
 	rig_init(&r);
@@ -427,6 +428,48 @@ static void test_motion(void)
 	check("MC-15", (r.c.p.kp_x1000 == 1500) && (r.c.p.ki_x1000 == MC_KI_X1000) &&
 	      (r.c.p.counts_per_m == (MC_COUNTS_PER_M * 11) / 10) && (r.c.p.counts_per_90deg == MC_COUNTS_PER_90DEG),
 	      "tune: valid values used, unset (-1) and out-of-range ignored");
+
+	/* a speed hold between ticks is applied at once (feedback IS32:
+	   steering latency); the integrators only move on the tick */
+	rig_init(&r);
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.type = MC_CMD_SPEED;
+	cmd.a = 200;
+	cmd.b = 200;
+	rig_tick(&r, &out, &cmd, false, false);
+	for (i = 0; i < 50; i++) {
+		rig_tick(&r, &out, NULL, false, false);
+	}
+	integ = r.c.w[0].integ;
+	memset(&in, 0, sizeof(in));
+	in.now_ms = r.t + 7U;
+	in.now_us = in.now_ms * 1000U;
+	in.count[0] = (int32_t)floor(r.cnt[0]);
+	in.count[1] = (int32_t)floor(r.cnt[1]);
+	cmd.a = 150;
+	cmd.b = 250;
+	cmd.c = (int32_t)(r.t + 4U);		/* the line reading was 3 ms earlier */
+	in.ncmd = 1U;
+	in.cmd = &cmd;
+	mc_core_step(&r.c, &in, &out);		/* woken by the hold, no tick */
+	check("MC-16", (r.c.w[0].target == 150) && (r.c.w[1].target == 250) && (out.duty[0] < out.duty[1]) &&
+	      (r.c.w[0].integ == integ) && (r.c.snap.steer_lat_ms == 3) && (r.c.snap.steer_lat_max_ms == 3),
+	      "speed hold between ticks: new targets and duties at once, latency logged");
+
+	/* stopping distance and stop latency are logged */
+	ack = 0;
+	stop_mm = -1;
+	for (i = 0; (i < 50) && !ack; i++) {
+		rig_tick(&r, &out, NULL, true, false);
+		for (k = 0U; k < out.ev.n; k++) {
+			if (out.ev.ev[k].type == EV_STOP_ACK) {
+				ack = 1;
+				stop_mm = out.ev.ev[k].p2;
+			}
+		}
+	}
+	check("MC-17", ack && (stop_mm > 0) && (stop_mm < 60) && (r.c.snap.stop_dist_mm == stop_mm) &&
+	      (r.c.snap.stop_lat_max_us > 0), "STOP_ACK carries the stopping distance; stop latency logged");
 }
 
 /* ===== IMU maths and terrain ========================================================= */
@@ -664,12 +707,13 @@ static void test_scan(void)
 	int		gap_ok = 1;
 	uint32_t	last_trig = 0U;
 	int		pending = 0;
+	int		stop_with_alert = 0, stray_stop = 0;
 
 	memset(visited, 0, sizeof(visited));
 	scan_core_init(&s, &k_sc);
 	memset(&in, 0, sizeof(in));
 	in.have_req = true;
-	in.req.mode = SCAN_WATCH;
+	in.req.mode = SCAN_WATCH | SCAN_STOP_FLAG;
 	in.req.id = 5;
 	for (i = 0; i < 100; i++) {
 		in.now_ms = (uint32_t)(i * 10);
@@ -688,10 +732,15 @@ static void test_scan(void)
 		}
 		if (has_event(&out.ev, EV_ALERT)) {
 			alert++;
+			stop_with_alert += out.stop_motors ? 1 : 0;
+		} else if (out.stop_motors) {
+			stray_stop++;
 		}
 	}
 	check("SC-01", gap_ok && (triggers >= 10), "watch: pings at least 70 ms apart");
 	check("SC-02", alert == 1, "two close readings: one ALERT, not repeated");
+	check("SC-08", (stop_with_alert == 1) && (stray_stop == 0),
+	      "WATCH with the stop flag: the ALERT also stops the car, once");
 
 	/* profile against a box 250 mm ahead, 120 mm wide */
 	in.have_req = true;
@@ -740,6 +789,28 @@ static void test_scan(void)
 		fault = out.fault;
 	}
 	check("SC-07", fault, "no response ten times in a row: sensor fault");
+
+	/* without the flag (driving past a known obstacle): ALERT only */
+	scan_core_init(&s, &k_sc);
+	memset(&in, 0, sizeof(in));
+	in.have_req = true;
+	in.req.mode = SCAN_WATCH;
+	in.req.id = 9;
+	alert = 0;
+	stray_stop = 0;
+	pending = 0;
+	for (i = 0; i < 40; i++) {
+		in.now_ms = (uint32_t)(i * 10);
+		in.echo = pending ? SCAN_ECHO_DONE : SCAN_ECHO_NONE;
+		in.range_mm = 200;
+		pending = 0;
+		scan_core_step(&s, &in, &out);
+		in.have_req = false;
+		pending = out.trigger ? 1 : 0;
+		alert += has_event(&out.ev, EV_ALERT) ? 1 : 0;
+		stray_stop += out.stop_motors ? 1 : 0;
+	}
+	check("SC-09", (alert == 1) && (stray_stop == 0), "WATCH without the stop flag: ALERT, no stop");
 }
 
 /* ===== vehicle controller ======================================================= */
@@ -809,6 +880,8 @@ static void test_vc(void)
 	OS_PROFILE		p;
 	const VC_ACTION		*x;
 	int32_t			id;
+	bool			ok;
+	APP_MSG			m;
 
 	vc_init(&v, &k_vc, &k_ls, 0U);
 	ev(&v, EV_COMMAND, CMD_START, 0, 10U, &a);
@@ -883,15 +956,55 @@ static void test_vc(void)
 	v.retries = VC_N_RETRY;
 	v.state = VC_SCANNING;
 	(void)bypass_side(&v, &p, &a);
-	check("VC-18", (v.state == VC_SAFE_STOP) && (find(&a, VA_FAULT) != NULL), "still no room after the retries: Safe Stop");
+	check("VC-18", (v.state == VC_HALTED) && (v.why == VC_WHY_NO_ROUTE) && (find(&a, VA_FAULT) == NULL) &&
+	      (find(&a, VA_STOP) != NULL), "still no room after the retries: HALTED (mission failure, no fault latched)");
 	p.valid = false;
 	to_scanning(&v, &a);
 	(void)bypass_side(&v, &p, &a);
 	check("VC-19", v.state == VC_REVERSE, "nothing seen clearly: back off and look again");
 	to_scanning(&v, &a);
 	vc_tick(&v, 60U + VC_T_SCAN_MS + 10U, 0, true, &a);
-	check("VC-20", (v.state == VC_SAFE_STOP) && (v.why == VC_WHY_SCAN_FAILED), "no profile in time: Safe Stop");
-	check("VC-21", strcmp(vc_state_name(VC_FIND_LINE), "FIND_LINE") == 0, "state names");
+	x = find(&a, VA_SCAN);
+	ok = (v.state == VC_SCANNING) && (x != NULL) && (x->a == (int32_t)SCAN_PROFILE);
+	vc_tick(&v, 60U + (2U * VC_T_SCAN_MS) + 30U, 0, true, &a);
+	check("VC-20", ok && (v.state == VC_HALTED) && (v.why == VC_WHY_SCAN_FAILED) && (find(&a, VA_FAULT) == NULL),
+	      "no profile in time: scan once more, then HALTED");
+	check("VC-21", (strcmp(vc_state_name(VC_FIND_LINE), "FIND_LINE") == 0) &&
+	      (strcmp(vc_state_name(VC_HALTED), "HALTED") == 0), "state names");
+
+	v.commands_done = 3U;
+	ev(&v, EV_COMMAND, CMD_START, 0, 60U + (2U * VC_T_SCAN_MS) + 50U, &a);
+	check("VC-22", (v.state == VC_FOLLOW) && (find(&a, VA_CLEAR_STOP) != NULL) && (v.commands_done == 3U),
+	      "START after HALTED carries on with the same run (no RESTART needed)");
+
+	/* Obstacle Scan stops the car itself, except while passing an
+	   obstacle the controller decided to pass (Continue) */
+	vc_init(&v, &k_vc, &k_ls, 0U);
+	vc_tick(&v, 20U, 0, true, &a);
+	ev(&v, EV_COMMAND, CMD_START, 0, 30U, &a);
+	x = find(&a, VA_SCAN);
+	ok = (x != NULL) && (x->a == (int32_t)(SCAN_WATCH | SCAN_STOP_FLAG));
+	p.valid = true;
+	p.x_left_mm = 150;
+	p.x_right_mm = 250;
+	p.left_clear_mm = OS_CLEAR_OPEN;
+	p.right_clear_mm = OS_CLEAR_OPEN;
+	to_scanning(&v, &a);
+	(void)bypass_side(&v, &p, &a);
+	x = find(&a, VA_SCAN);
+	ok = ok && (v.state == VC_FOLLOW) && (x != NULL) && (x->a == (int32_t)SCAN_WATCH);
+	vc_tick(&v, 200U, v.alert_mute_odo + 1, true, &a);
+	x = find(&a, VA_SCAN);
+	check("VC-23", ok && (x != NULL) && (x->a == (int32_t)(SCAN_WATCH | SCAN_STOP_FLAG)),
+	      "WATCH asks Obstacle Scan to stop the car; not while passing a known obstacle, then again");
+
+	memset(&m, 0, sizeof(m));
+	m.type = EV_LINE_STATUS;
+	m.p1 = 1;
+	m.t_ms = 1234U;
+	vc_event(&v, &m, 1236U, v.alert_mute_odo + 2, &a);
+	x = find(&a, VA_HOLD);
+	check("VC-24", (x != NULL) && (x->c == 1234), "a steering hold carries the time of its line reading");
 }
 
 /* ===== commands and telemetry =================================================== */
@@ -923,7 +1036,9 @@ static void test_tel(void)
 	char		small[20];
 	APP_MSG		m;
 	TEL_SUMMARY	s;
+	TEL_TIMING	tm;
 	int32_t		n1, n2, n3, n4;
+	uint32_t	k;
 	TJ		j;
 
 	memset(&d, 0xFF, sizeof(d));		/* every number as large as it gets */
@@ -971,6 +1086,30 @@ static void test_tel(void)
 	n1 = tel_fmt_telemetry(&d, buf, TEL_JSON_MAX);
 	buf[(n1 > 0) ? n1 : 0] = '\0';
 	check("TEL-05", strstr(buf, "\"v\":[212,208]") != NULL, "wheel speeds as a pair");
+
+	memset(&tm, 0, sizeof(tm));
+	tm.t_ms = 0xFFFFFFFFU;
+	for (k = 0U; k < TEL_TIM_TASKS; k++) {
+		tm.max_us[k] = 0xFFFFFFFFU;
+	}
+	tm.overruns = 0xFFFFFFFFU;
+	tm.irq_per_s = 0xFFFFFFFFU;
+	tm.irq_max_us = 0xFFFFFFFFU;
+	tm.vq_high = 0xFFFFFFFFU;
+	tm.dropped = 0xFFFFFFFFU;
+	tm.steer_lat_max_ms = INT32_MAX;
+	tm.stop_lat_max_us = INT32_MIN;
+	tm.stop_dist_mm = INT32_MAX;
+	tm.reconnect_ms = 0xFFFFFFFFU;
+	n1 = tel_fmt_timing(&tm, buf, TEL_JSON_MAX);
+	check("TEL-06", (n1 > 0) && (strstr(buf, "\"ev\":\"tim\"") != NULL),
+	      "timing message fits in 200 bytes with the largest values");
+
+	check("EVT-01", evt_is_safety(EV_FAULT) && evt_is_safety(EV_IMPACT) && evt_is_safety(EV_ALERT) &&
+	      evt_is_safety(EV_STOP_ACK) && evt_is_safety(EV_BUTTON) && evt_is_safety(EV_COMMAND) &&
+	      evt_is_safety(EV_FAULT_CLEAR) && !evt_is_safety(EV_LINE_STATUS) && !evt_is_safety(EV_JUNCTION) &&
+	      !evt_is_safety(EV_DONE) && !evt_is_safety(EV_TERRAIN) && !evt_is_safety(EV_RANGE_ZONE),
+	      "queue policy: safety events must arrive, the rest may be dropped and counted");
 }
 
 int main(void)

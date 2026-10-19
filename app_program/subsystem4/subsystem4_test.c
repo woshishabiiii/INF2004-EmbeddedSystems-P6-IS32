@@ -7,6 +7,7 @@
 #include "subsystem4.h"
 #include "imu_cfg.h"
 #include "imu_math.h"
+#include "../gpio_irq.h"
 #include "../test_report.h"
 
 #if APP_TEST
@@ -55,6 +56,12 @@ EXPORT void subsystem4_test(void)
 		TEST_CHECK("S4-U07", st.ok && st.calibrated, "IMU answers and has calibrated");
 		TEST_CHECK("S4-U08", (st.g0_mg > 900) && (st.g0_mg < 1100), "|g| at rest is 900..1100 mg");
 	}
+
+	/* I2C0 moved from GP8/GP9 (Motor 1) to GP4/GP5 by the team's kernel
+	   configuration: confirm it on the board */
+	TEST_CHECK("S4-U09", (gpio_funcsel(4U) == GPIO_FUNC_I2C) && (gpio_funcsel(5U) == GPIO_FUNC_I2C) &&
+		   (gpio_funcsel(8U) != GPIO_FUNC_I2C) && (gpio_funcsel(9U) != GPIO_FUNC_I2C),
+		   "I2C0 is on GP4/GP5, not on the Motor 1 pins");
 
 	TEST_SUMMARY("subsystem4");
 }

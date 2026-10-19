@@ -322,3 +322,32 @@ int32_t tel_fmt_summary(const TEL_SUMMARY *s, char *buf, uint32_t cap)
 	tj_uint(&j, "bc_bad", s->reads_failed);
 	return tj_end(&j);
 }
+
+static uint32_t ulim(uint32_t v, uint32_t max)
+{
+	return (v > max) ? max : v;
+}
+
+int32_t tel_fmt_timing(const TEL_TIMING *s, char *buf, uint32_t cap)
+{
+	static const char * const key[TEL_TIM_TASKS] = {"mc", "ln", "vc", "sc", "im", "sm", "tl"};
+	TJ		j;
+	uint32_t	i;
+
+	tj_begin(&j, buf, cap);
+	tj_uint(&j, "t", s->t_ms);
+	tj_str(&j, "ev", "tim");
+	for (i = 0U; i < TEL_TIM_TASKS; i++) {
+		tj_uint(&j, key[i], ulim(s->max_us[i], (uint32_t)LIM5));
+	}
+	tj_uint(&j, "ov", ulim(s->overruns, (uint32_t)LIM5));
+	tj_uint(&j, "irq", ulim(s->irq_per_s, (uint32_t)LIM5));
+	tj_uint(&j, "irqm", ulim(s->irq_max_us, (uint32_t)LIM4));
+	tj_uint(&j, "vq", ulim(s->vq_high, 99U));
+	tj_uint(&j, "dr", ulim(s->dropped, (uint32_t)LIM5));
+	tj_uint(&j, "sl", ulim((s->steer_lat_max_ms > 0) ? (uint32_t)s->steer_lat_max_ms : 0U, (uint32_t)LIM4));
+	tj_uint(&j, "st", ulim((s->stop_lat_max_us > 0) ? (uint32_t)s->stop_lat_max_us : 0U, (uint32_t)LIM5));
+	tj_uint(&j, "sd", ulim((s->stop_dist_mm > 0) ? (uint32_t)s->stop_dist_mm : 0U, 999U));
+	tj_uint(&j, "rc", ulim(s->reconnect_ms, (uint32_t)LIM5));
+	return tj_end(&j);
+}

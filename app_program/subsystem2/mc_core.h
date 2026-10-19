@@ -28,7 +28,8 @@
 #define MC_ACCEL_WINDOW		5U	/* periods (100 ms) over which acceleration is measured */
 
 /* ---- commands (motion_cmd_q, 16 bytes) ---------------------------------- */
-#define MC_CMD_SPEED		1U	/* a = left mm/s,  b = right mm/s */
+#define MC_CMD_SPEED		1U	/* a = left mm/s,  b = right mm/s, c = time (ms) of the
+				   line reading that caused it, 0 = none (latency log) */
 #define MC_CMD_DISTANCE		2U	/* a = signed mm (+ forward), b = speed mm/s, c = move id */
 #define MC_CMD_TURN		3U	/* a = signed deg (+ left), b = wheel speed mm/s (0 = default), c = move id */
 
@@ -97,6 +98,10 @@ typedef struct {
 	int32_t		yaw_cdeg_s;	/* turn rate from the wheel speeds, + = left */
 	int32_t		mode;		/* MC_MODE */
 	int32_t		fault_code;	/* MC_FLT_... */
+	int32_t		steer_lat_ms;	/* line reading -> new wheel targets, last hold */
+	int32_t		steer_lat_max_ms;	/* ... largest so far */
+	int32_t		stop_lat_max_us;	/* stop request -> duty 0, largest so far */
+	int32_t		stop_dist_mm;	/* travel from CMD_STOP to stopped, last stop */
 } MC_SNAPSHOT;
 
 typedef struct {
@@ -129,6 +134,7 @@ typedef struct {
 	bool		await_fault_flag;	/* own fault: stay in MC_FAULT until FAULT_STOP is seen */
 	bool		ack_pending;	/* STOP_ACK still to be sent */
 	uint32_t	stop_req_us;	/* when the stop was requested */
+	int32_t		stop_odo;	/* odometer when CMD_STOP was seen */
 	int32_t		odo_rem;	/* odometer remainder (mm x counts_per_m) */
 	int32_t		dist_rem;	/* net distance remainder */
 	int32_t		mean_hist[MC_ACCEL_WINDOW + 1U];	/* mean speeds, newest first */
@@ -140,11 +146,12 @@ typedef struct {
 	uint32_t	now_ms;
 	uint32_t	now_us;
 	int32_t		count[MC_WHEELS];
-	bool		tick;		/* TRUE on the 20 ms release: run the control loop */
+	bool		tick;		/* TRUE on the 20 ms release: run the control loop;
+					   FALSE: woken by a stop or a new speed hold */
 	bool		cmd_stop;	/* stop_flags CMD_STOP */
 	bool		fault_stop;	/* stop_flags FAULT_STOP */
 	uint32_t	stop_req_us;	/* time of the latest stop request */
-	uint32_t	ncmd;		/* new commands, oldest first (only read on a tick) */
+	uint32_t	ncmd;		/* new commands, oldest first (taken on every call) */
 	const MC_CMD	*cmd;
 } MC_IN;
 
@@ -153,7 +160,7 @@ typedef struct {
 	bool		flush;		/* discard every queued command */
 	bool		fault;		/* own fault: set FAULT_STOP and FLT_MOTION */
 	uint32_t	stop_latency_us;	/* non-zero once: request -> duty 0 */
-	EVT_LIST	ev;		/* EV_DONE, EV_STOP_ACK */
+	EVT_LIST	ev;		/* EV_DONE, EV_STOP_ACK [latency us, stop distance mm] */
 } MC_OUT;
 
 void	mc_core_init(MC_CORE *c, const MC_PARAMS *p, const int32_t count[MC_WHEELS]);

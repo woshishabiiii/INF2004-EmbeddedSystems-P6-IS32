@@ -5,6 +5,9 @@
  *
  *	One call of mc_core_step():
  *	  1. stop bits first -- a set bit always wins, on every call;
+ *	  between ticks (woken by a new speed hold): the hold is applied at
+ *	  once -- new wheel targets and duties -- so steering does not wait up
+ *	  to 20 ms for the next tick (design-review feedback IS32);
  *	  and on the 20 ms control tick only:
  *	  2. measure both wheel speeds from the encoder counts;
  *	  3. take the new commands (a new one replaces the current move);
@@ -163,6 +166,7 @@ static void handle_stop_bits(MC_CORE *c, const MC_IN *in, MC_OUT *out)
 			c->mode = MC_STOPPED;
 			c->ack_pending = true;
 			c->stop_req_us = in->stop_req_us;
+			c->stop_odo = c->snap.odo_mm;
 			out->flush = true;
 			out->stop_latency_us = (in->now_us - in->stop_req_us) | 1U;
 		} else if ((c->mode == MC_FAULT) && !c->await_fault_flag) {
@@ -284,30 +288,47 @@ static void take_commands(MC_CORE *c, const MC_IN *in)
 			c->rejected++;
 		} else {
 			start_move(c, &in->cmd[i]);
+			if ((in->cmd[i].type == MC_CMD_SPEED) && (in->cmd[i].c != 0)) {
+				/* latency log: line reading -> these wheel targets */
+				int32_t lat = (int32_t)(in->now_ms - (uint32_t)in->cmd[i].c);
+
+				c->snap.steer_lat_ms = (lat > 0) ? lat : 0;
+				if (c->snap.steer_lat_ms > c->snap.steer_lat_max_ms) {
+					c->snap.steer_lat_max_ms = c->snap.steer_lat_ms;
+				}
+			}
 		}
 	}
 }
 
 /* ---- 4. the active move ------------------------------------------------- */
-static void run_speed(MC_CORE *c)
+/* Wheel targets from the (ramped) common speed.  The steering part is
+   scaled with it, so the wheels keep their ratio while accelerating (no
+   wheel reverses just because the car is starting off). */
+static void speed_targets(MC_CORE *c)
 {
 	int32_t want = (c->hold_cmd[MC_LEFT] + c->hold_cmd[MC_RIGHT]) / 2;
 	int32_t diff = (c->hold_cmd[MC_RIGHT] - c->hold_cmd[MC_LEFT]) / 2;
-	int32_t step = (c->p.accel * MC_PERIOD_MS) / 1000;
 
-	/* Ramp the common speed; scale the steering part with it, so the
-	   wheels keep their ratio while accelerating (no wheel reverses
-	   just because the car is starting off). */
-	if (c->hold_common < want) {
-		c->hold_common = (c->hold_common + step < want) ? (c->hold_common + step) : want;
-	} else {
-		c->hold_common = (c->hold_common - step > want) ? (c->hold_common - step) : want;
-	}
 	if ((want != 0) && (c->hold_common != want)) {
 		diff = (diff * c->hold_common) / want;
 	}
 	c->w[MC_LEFT].target = c->hold_common - diff;
 	c->w[MC_RIGHT].target = c->hold_common + diff;
+}
+
+static void run_speed(MC_CORE *c)
+{
+	int32_t want = (c->hold_cmd[MC_LEFT] + c->hold_cmd[MC_RIGHT]) / 2;
+	int32_t step = (c->p.accel * MC_PERIOD_MS) / 1000;
+
+	/* Ramp the common speed by one tick's worth */
+	if (c->hold_common < want) {
+		c->hold_common = (c->hold_common + step < want) ? (c->hold_common + step) : want;
+	} else {
+		c->hold_common = (c->hold_common - step > want) ? (c->hold_common - step) : want;
+	}
+	speed_targets(c);
 }
 
 static void run_profile(MC_CORE *c)
@@ -354,7 +375,8 @@ static void run_profile(MC_CORE *c)
 }
 
 /* ---- 5. per-wheel PI with feed-forward and anti-windup ------------------ */
-static int32_t wheel_pi(const MC_PARAMS *p, MC_WHEEL *w)
+/* integrate: TRUE on the tick only (the integral is per 20 ms period) */
+static int32_t wheel_pi(const MC_PARAMS *p, MC_WHEEL *w, bool integrate)
 {
 	int32_t err, out, step;
 
@@ -371,7 +393,8 @@ static int32_t wheel_pi(const MC_PARAMS *p, MC_WHEEL *w)
 	/* Integrate only when the output is not saturated, or when the error
 	   pulls it back out of saturation. */
 	step = (p->ki_x1000 * err) / MC_TICKS_PER_S;
-	if (((out < MC_DUTY_MAX) || (err < 0)) && ((out > -MC_DUTY_MAX) || (err > 0))) {
+	if (integrate &&
+	    ((out < MC_DUTY_MAX) || (err < 0)) && ((out > -MC_DUTY_MAX) || (err > 0))) {
 		w->integ = clamp32(w->integ + step, -MC_INTEG_MAX, MC_INTEG_MAX);
 	}
 	return clamp32(out, -MC_DUTY_MAX, MC_DUTY_MAX);
@@ -450,6 +473,9 @@ void mc_core_step(MC_CORE *c, const MC_IN *in, MC_OUT *out)
 	evt_list_clear(&out->ev);
 
 	handle_stop_bits(c, in, out);
+	if ((int32_t)out->stop_latency_us > c->snap.stop_lat_max_us) {
+		c->snap.stop_lat_max_us = (int32_t)out->stop_latency_us;
+	}
 
 	if (in->tick) {
 		measure(c, in->count);
@@ -476,8 +502,10 @@ void mc_core_step(MC_CORE *c, const MC_IN *in, MC_OUT *out)
 			if (c->ack_pending &&
 			    (iabs32(c->w[MC_LEFT].speed) < c->p.settle_speed) &&
 			    (iabs32(c->w[MC_RIGHT].speed) < c->p.settle_speed)) {
+				c->snap.stop_dist_mm = c->snap.odo_mm - c->stop_odo;
 				(void)evt_list_add(&out->ev, (uint8_t)EV_STOP_ACK,
-						   (int32_t)(in->now_us - c->stop_req_us), 0);
+						   (int32_t)(in->now_us - c->stop_req_us),
+						   c->snap.stop_dist_mm);
 				c->ack_pending = false;
 			}
 			break;
@@ -487,7 +515,7 @@ void mc_core_step(MC_CORE *c, const MC_IN *in, MC_OUT *out)
 
 		if ((c->mode == MC_SPEED) || (c->mode == MC_DISTANCE) || (c->mode == MC_TURN)) {
 			for (i = 0U; i < MC_WHEELS; i++) {
-				c->w[i].duty = wheel_pi(&c->p, &c->w[i]);
+				c->w[i].duty = wheel_pi(&c->p, &c->w[i], true);
 			}
 			check_wheels(c, out);
 		} else {
@@ -497,6 +525,19 @@ void mc_core_step(MC_CORE *c, const MC_IN *in, MC_OUT *out)
 			}
 		}
 		update_snapshot(c, in->now_ms);
+	} else if (in->ncmd > 0U) {
+		/* Woken between ticks by a new speed hold: apply it now.  The
+		   speed measurement, the ramp and the integrators only move on
+		   the tick; a distance or turn command starts on the next tick. */
+		take_commands(c, in);
+		if (c->mode == MC_SPEED) {
+			speed_targets(c);
+			for (i = 0U; i < MC_WHEELS; i++) {
+				c->w[i].duty = wheel_pi(&c->p, &c->w[i], false);
+			}
+		}
+	} else {
+		/* stop bits only */
 	}
 
 	for (i = 0U; i < MC_WHEELS; i++) {

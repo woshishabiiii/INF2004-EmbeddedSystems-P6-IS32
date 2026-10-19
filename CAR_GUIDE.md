@@ -99,11 +99,11 @@ Each step is a manual test in `testing/subsystemN/TEST_LOG.md`.
 
 | Action | Button | MQTT (`car/g07/cmd`) |
 |---|---|---|
-| Start (from READY or FINISHED) | GP20 | `<seq> START` |
+| Start (from READY or FINISHED), or carry on after HALTED | GP20 | `<seq> START` |
 | Stop (back to READY, motors held) | GP21 | `<seq> STOP` |
 | Restart after a fault (Safe Stop → READY) | GP20 | `<seq> RESTART` |
 | End the run, publish the summary | — | `<seq> FINISH` |
-| Change a value (only in READY / FINISHED; used from the next START) | — | `<seq> SET <name> <value>` |
+| Change a value (only in READY / FINISHED / HALTED; used from the next START) | — | `<seq> SET <name> <value>` |
 
 `<seq>` is 1, 2, 3, … and must grow with every command (a repeat is
 ignored); it starts again from 1 after the car restarts. `SET` names and
@@ -117,19 +117,35 @@ limits: `base_speed` 80–400 mm/s, `stop_mm` 150–600, `kp_x1000` 0–20000,
 | `car/g07/telemetry` | every 0.5 s | `{"t":81520,"st":"FOLLOW","v":[212,208],"enc":[1520,1498],"d":1834,"ln":"WB","bc":"A","cmd":1,"p":-12,"mo":"MOVING","hmax":12,"rng":350,"yaw":-5,"flt":0}` |
 | `car/g07/status` | every 1 s | `{"up":81,"st":"FOLLOW","why":0,"flt":0,"mcf":0,"imu":1,"hdg":-34,"pings":1204,"wifi":3,"mq":1,"conn":1,"txd":0,"rxd":0,"nerr":0}` |
 | `car/g07/event` | on change | `{"t":…,"ev":"barcode","c":"A","cmd":1}`, `"state"`, `"nav"`, `"junction"`, `"hump"`, `"terrain"`, `"motion"`, `"profile"`, `"impact"`, `"fault"`, `"cmd"` (acknowledgement), `"summary"` |
+| `car/g07/event` | every 5 s | `{"t":…,"ev":"tim","mc":85,"ln":160,"vc":40,"sc":30,"im":260,"sm":12,"tl":900,"ov":0,"irq":820,"irqm":4,"vq":2,"dr":0,"sl":1,"st":35,"sd":14,"rc":7400}` (illustrative values) |
 
 Field meanings: `st` state, `v` wheel speeds mm/s, `enc` encoder counts,
 `d` distance travelled mm, `ln` line sensors (left, right; B = black),
 `bc` last barcode, `cmd` waiting barcode command (1 left, 2 right,
 3 straight, 4 U-turn), `p` pitch in tenths of a degree, `mo` motion class,
 `hmax` highest hump mm, `rng` forward range mm (-1 = none), `yaw` turn rate
-deg/s, `flt` latched fault bits, `why` reason for the last Safe Stop,
-`mcf` Motion Control fault (1 stall, 2 timeout, 3 encoder direction).
+deg/s, `flt` latched fault bits, `why` reason for the last SAFE_STOP or
+HALTED, `mcf` Motion Control fault (1 stall, 2 timeout, 3 encoder
+direction).
 
-Fault bits: 0x01 motion, 0x02 line/barcode, 0x04 IMU, 0x08 impact,
-0x10 ultrasonic, 0x20 queue overflow, 0x40 task stopped, 0x80 navigation
-(see `why`: 3 stop not acknowledged, 4 no scan result, 5 no way round,
-6 line not found, 7 blocked during a bypass, 8/9 command or bypass too slow).
+`tim` (timing and queue health, design-review feedback IS32): `mc ln vc sc
+im sm tl` longest run of each task in µs (Motion, Line, Vehicle Controller,
+Scan, IMU, Safety Monitor, Telemetry), `ov` releases missed, `irq` GPIO
+interrupts per second, `irqm` longest interrupt µs, `vq` most events
+waiting in Vehicle Controller's inbox, `dr` events dropped, `sl` steering
+latency ms (line reading → new wheel targets), `st` stop latency µs
+(request → duty 0), `sd` last stopping distance mm, `rc` last MQTT
+reconnect time ms. Compare `mc` and `ln` with their 20 ms and 5 ms periods.
+
+Fault bits (safety faults: SAFE_STOP, leave with RESTART then START):
+0x01 motion, 0x02 barcode interrupt set-up, 0x04 IMU, 0x08 impact,
+0x10 ultrasonic not answering, 0x20 a safety event lost to a full queue,
+0x40 task stopped, 0x80 wheels did not stop (`why` 3).
+
+Mission failures are not faults: the car stops (HALTED) and `why` says why:
+4 no scan result (after a rescan), 5 no way round, 6 line not found,
+7 blocked during a bypass, 8/9 command or bypass too slow. Put the car back
+on the line and press START to carry on.
 
 ## 6. Behaviour in one paragraph
 
@@ -144,14 +160,15 @@ is. After any turn or bypass the line must show up within `VC_ACQUIRE_MM`,
 otherwise the car searches at once. A line search (line lost for
 `LB_T_LOST_MS`, or not reacquired) spins 120° toward the side the line was
 last seen, then 240° the other way, then 120° back; the first black ends
-it, and nothing found is a Safe Stop (`why` 6). On a hump the car slows, drives straight on the encoders and ignores the
+it, and nothing found stops the car (HALTED, `why` 6). On a hump the car slows, drives straight on the encoders and ignores the
 line until the IMU reports level again; the hump's height is reported when
 the car is past it. When the ultrasonic sees something within `stop_mm`
-twice in a row, the car stops, scans 30°–150° (coarse, then 5° steps around
-the obstacle), and either continues (obstacle beside the path), drives round
-it on the side with room and the smaller detour, then finds and lines up
-with the line again, or backs off and scans again (twice), then Safe Stop.
-Any fault stops the motors at once (Safe Stop) until RESTART with the fault
+twice in a row, the Obstacle Scan task stops the car itself, then the
+controller scans 30°–150° (coarse, then 5° steps around the obstacle), and
+either continues (obstacle beside the path), drives round it on the side
+with room and the smaller detour, then finds and lines up with the line
+again, or backs off and scans again (twice), then stops (HALTED). A safety
+fault stops the motors at once (Safe Stop) until RESTART with the fault
 gone.
 
 ## 7. Laptop tests and simulator

@@ -53,7 +53,7 @@ Safety Monitor's latch.
 | `barcode_A`, `_B`, `_C`, `_D`, `_Z`, `barcode_A_back` | decode at speed, run the command at the junction, follow the new branch |
 | `obstacle_mid`, `obstacle_right`, `obstacle_wall` | stop, profile, choose a side, bypass, find and rejoin the line |
 | `hump` | a short and a long hump: heights and the highest hump |
-| `dead_end` | line search fails, Safe Stop, RESTART, START |
+| `dead_end` | line search fails: HALTED (a mission failure, nothing latched), START carries on |
 | `stop_start` | STOP latency, repeated command, SET, STOP button, FINISH |
 | `imu_fault` | sensor failure, restart refused until it recovers |
 | `impact` | an obstacle the sonar cannot see: collision detected, Safe Stop |

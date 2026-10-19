@@ -4,7 +4,13 @@
  *	and the Vehicle Controller states of Figure 7 -- follow the line, run
  *	barcode commands at junctions, search for a lost line, stop and scan
  *	for obstacles, choose Continue / Bypass / Reverse and Retry, bypass,
- *	find and rejoin the line, Safe Stop and Finished.
+ *	find and rejoin the line, Safe Stop, Halted and Finished.
+ *
+ *	Two kinds of stop (fault table in safety_core.h):
+ *	  SAFE_STOP  a safety fault: Safety Monitor has latched FAULT_STOP;
+ *	             leave with RESTART, then START.
+ *	  HALTED     a mission failure (line not found, no way round, ...):
+ *	             stopped with CMD_STOP, nothing latched; START carries on.
  *
  *	Pure C.  It never calls the motion API itself: every step returns a
  *	short list of ACTIONS (hold speed, move, turn, stop, scan request,
@@ -34,18 +40,20 @@ typedef enum {
 	VC_REVERSE,		/* backing off before scanning again */
 	VC_FIND_LINE,		/* heading back to the line */
 	VC_ALIGN,		/* line found: lining up with it */
-	VC_SAFE_STOP,		/* fault: motors off until RESTART */
+	VC_SAFE_STOP,		/* safety fault: motors off until RESTART */
 	VC_FINISHED,		/* FINISH received: run summary sent */
+	VC_HALTED,		/* mission failure: stopped (CMD_STOP), START carries on */
 	VC_STATES
 } VC_STATE;
 
 /* Actions */
-#define VA_HOLD		1U	/* a = left mm/s, b = right mm/s */
+#define VA_HOLD		1U	/* a = left mm/s, b = right mm/s, c = time of the line
+				   reading that caused it (0 = none), for the latency log */
 #define VA_MOVE		2U	/* a = signed mm (+ forward), b = speed, c = move id */
 #define VA_TURN		3U	/* a = signed degrees (+ left), c = move id */
 #define VA_STOP		4U	/* set CMD_STOP */
 #define VA_CLEAR_STOP	5U	/* clear CMD_STOP */
-#define VA_SCAN		6U	/* a = SCAN_..., b = stop mm, c = request id */
+#define VA_SCAN		6U	/* a = SCAN_... (+ SCAN_STOP_FLAG), b = stop mm, c = request id */
 #define VA_FAULT	7U	/* a = fault bits to raise */
 #define VA_RESTART	8U	/* ask Safety Monitor to clear the faults */
 #define VA_TEL		9U	/* telemetry record: a = EV_..., b = p1, c = p2 */
@@ -75,17 +83,17 @@ typedef struct {
 #define NAV_FINISH	9	/* p2 = distance of the run, mm */
 #define NAV_REFUSED	10	/* command refused in this state: p2 = CMD_... */
 
-/* EV_STATE.p2: why Safe Stop was entered */
+/* EV_STATE.p2: why SAFE_STOP (1-3: safety) or HALTED (4-9: mission) was entered */
 #define VC_WHY_NONE		0
-#define VC_WHY_FAULT		1	/* a fault reported by Safety Monitor */
-#define VC_WHY_IMPACT		2
-#define VC_WHY_ACK_TIMEOUT	3	/* the wheels did not stop in time */
-#define VC_WHY_SCAN_FAILED	4	/* no profile in time */
-#define VC_WHY_NO_ROUTE		5	/* no side clear after every retry */
-#define VC_WHY_SEARCH_FAILED	6	/* line not found */
-#define VC_WHY_BLOCKED		7	/* obstacle during a bypass */
-#define VC_WHY_EXEC_TIMEOUT	8
-#define VC_WHY_BYPASS_TIMEOUT	9
+#define VC_WHY_FAULT		1	/* SAFE_STOP: a fault reported by Safety Monitor */
+#define VC_WHY_IMPACT		2	/* SAFE_STOP: collision */
+#define VC_WHY_ACK_TIMEOUT	3	/* SAFE_STOP: the wheels did not stop in time */
+#define VC_WHY_SCAN_FAILED	4	/* HALTED: no profile, even after a rescan */
+#define VC_WHY_NO_ROUTE		5	/* HALTED: no side clear after every retry */
+#define VC_WHY_SEARCH_FAILED	6	/* HALTED: line not found */
+#define VC_WHY_BLOCKED		7	/* HALTED: obstacle during a bypass */
+#define VC_WHY_EXEC_TIMEOUT	8	/* HALTED: a barcode command took too long */
+#define VC_WHY_BYPASS_TIMEOUT	9	/* HALTED: the bypass took too long */
 
 typedef struct {
 	int32_t		base_speed;
@@ -137,7 +145,7 @@ typedef struct {
 	VC_STATE	state;
 	uint32_t	entered_ms;	/* when this state began */
 	uint32_t	episode_ms;	/* when this exec / search / bypass began */
-	int32_t		why;		/* VC_WHY_... of the last Safe Stop */
+	int32_t		why;		/* VC_WHY_... of the last SAFE_STOP or HALTED */
 	bool		faulted;	/* Safety Monitor has latched a fault */
 	int32_t		fault_bits;
 	bool		sensors_ready;
@@ -162,7 +170,10 @@ typedef struct {
 	int32_t		hold_l;
 	int32_t		hold_r;
 	uint32_t	hold_ms;
+	uint32_t	steer_src_ms;	/* time of the line reading being handled (0 = none) */
 	/* scanning */
+	bool		watch_stops;	/* the active WATCH has SCAN_STOP_FLAG */
+	bool		rescanned;	/* this obstacle has been scanned a second time */
 	int32_t		watch_id;
 	int32_t		scan_id;
 	uint32_t	retries;

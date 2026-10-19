@@ -47,6 +47,7 @@ IMPORT volatile UW	net_rx_drops;	/* commands lost (buffer full or too long) */
 IMPORT volatile UW	net_errors;	/* commands too long, or publishes refused by lwIP */
 IMPORT volatile UW	net_connects;	/* MQTT connections made */
 IMPORT volatile BOOL	net_up;		/* MQTT connected now */
+IMPORT volatile UW	net_reconnect_ms;	/* last loss -> connected again, ms (0 = none) */
 IMPORT const char	*net_topic_name(UINT topic);
 IMPORT void		telemetry_task(INT stacd, void *exinf);
 

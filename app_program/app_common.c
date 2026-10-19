@@ -61,3 +61,84 @@ EXPORT ER app_send_list(ID mbf, UB source, UH *seq, const EVT_LIST *l)
 	}
 	return result;
 }
+
+/* ---- queue-overflow policy ------------------------------------------------ */
+#define DROP_SOURCES	8U		/* SRC_... are 1..7 */
+
+LOCAL UW	s_dropped[DROP_SOURCES];	/* one writer per source task */
+
+EXPORT ER app_send_event(ID mbf, UB source, UH *seq, UB type, W p1, W p2, BOOL *was_dropped)
+{
+	ER	er = app_send(mbf, source, seq, type, p1, p2);
+	BOOL	drop = FALSE;
+
+	if ((er != E_OK) && !evt_is_safety(type)) {
+		drop = TRUE;			/* information only: drop and count */
+		if (source < DROP_SOURCES) {
+			s_dropped[source]++;
+		}
+		er = E_OK;
+	}
+	if (was_dropped != NULL) {
+		*was_dropped = drop;
+	}
+	return er;				/* not E_OK: a safety event was lost */
+}
+
+EXPORT ER app_send_events(ID mbf, UB source, UH *seq, const EVT_LIST *l, UW *dropped)
+{
+	ER	result = E_OK;
+	UW	mask = 0U;
+	UW	i;
+
+	for (i = 0U; i < l->n; i++) {
+		BOOL	drop;
+		ER	er = app_send_event(mbf, source, seq, l->ev[i].type, l->ev[i].p1, l->ev[i].p2, &drop);
+
+		if (er != E_OK) {
+			result = er;			/* must not be lost: caller raises a fault */
+		}
+		if (drop) {
+			mask |= 1UL << i;
+		}
+	}
+	if (dropped != NULL) {
+		*dropped = mask;
+	}
+	return result;
+}
+
+EXPORT UW app_dropped(void)
+{
+	UW sum = 0U;
+	UW i;
+
+	for (i = 0U; i < DROP_SOURCES; i++) {
+		sum += s_dropped[i];
+	}
+	return sum;
+}
+
+/* ---- task timing ---------------------------------------------------------- */
+LOCAL APP_TIMING	s_timing;
+
+EXPORT void app_task_time(UINT slot, UW start_us)
+{
+	UW dt = app_us() - start_us;
+
+	if ((slot < TIM_SLOTS) && (dt > s_timing.max_us[slot])) {
+		s_timing.max_us[slot] = dt;
+	}
+}
+
+EXPORT void app_task_overrun(UINT slot, UW missed)
+{
+	if (slot < TIM_SLOTS) {
+		s_timing.overruns[slot] += missed;
+	}
+}
+
+EXPORT void app_timing_get(APP_TIMING *out)
+{
+	*out = s_timing;		/* word copies; each slot has one writer */
+}

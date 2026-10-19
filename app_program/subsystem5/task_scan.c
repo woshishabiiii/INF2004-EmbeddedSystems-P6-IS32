@@ -5,6 +5,12 @@
  *	the RTOS side.  Nothing here waits: servo settling, the 70 ms trigger
  *	gap and the echo are all checked again on the next 10 ms step.  The
  *	only busy-wait is the 10 us trigger pulse in drv_hcsr04.c.
+ *
+ *	On a confirmed close range during a WATCH request with SCAN_STOP_FLAG,
+ *	this task sets CMD_STOP itself (motion_stop) BEFORE it sends the ALERT,
+ *	so the stop does not depend on vc_event_q or on Vehicle Controller
+ *	(design-review feedback IS32).  Vehicle Controller still decides what
+ *	happens next and is the only task that clears CMD_STOP.
  */
 
 #include "subsystem5.h"
@@ -12,6 +18,7 @@
 #include "drv_hcsr04.h"
 #include "drv_servo.h"
 #include "../subsystem1/subsystem1.h"	/* telemetry_q */
+#include "../subsystem2/subsystem2.h"	/* motion_stop() */
 #include "../subsystem4/subsystem4.h"	/* fault_flags, health_stamp() */
 
 LOCAL SCAN_CORE		s_scan;
@@ -100,8 +107,15 @@ EXPORT void scan_task(INT stacd, void *exinf)
 	scan_core_init(&s_scan, &s_params);
 
 	while (1) {
+		UW	t0;
+		INT	missed;
+
 		(void)tk_slp_tsk(TMO_FEVR);
-		(void)tk_can_wup(TSK_SELF);	/* never "catch up" after a delay */
+		t0 = app_us();
+		missed = tk_can_wup(TSK_SELF);	/* never "catch up" after a delay */
+		if (missed > 0) {
+			app_task_overrun(TIM_SCAN, (UW)missed);
+		}
 		health_stamp(HEALTH_SCAN);
 
 		/* Inputs: the newest request, the ping result */
@@ -118,7 +132,11 @@ EXPORT void scan_task(INT stacd, void *exinf)
 
 		scan_core_step(&s_scan, &in, &out);
 
-		/* Outputs */
+		/* Outputs: a confirmed obstacle stops the car first */
+		if (out.stop_motors) {
+			(void)motion_stop();
+			tm_printf((UB*)"[OS] obstacle at %d mm: CMD_STOP set\n", s_scan.last_range);
+		}
 		if (out.servo_deg != servo_now) {
 			servo_now = out.servo_deg;
 			servo_set_deg(servo_now);
@@ -138,12 +156,15 @@ EXPORT void scan_task(INT stacd, void *exinf)
 				  s_profile.closest_mm, s_profile.closest_deg, s_profile.left_clear_mm,
 				  s_profile.right_clear_mm, s_profile.unknown_left, s_profile.unknown_right);
 		}
-		if (app_send_list(vc_event_q, (UB)SRC_SCAN, &s_seq_vc, &out.ev) != E_OK) {
+		/* EV_ALERT must arrive; range zones and profiles are dropped and
+		   counted if the inbox is full (evt_is_safety()) */
+		if (app_send_events(vc_event_q, (UB)SRC_SCAN, &s_seq_vc, &out.ev, NULL) != E_OK) {
 			(void)tk_set_flg(fault_flags, FLT_QUEUE_OVF);
 		}
 
-		s_status.mode = (W)s_scan.req.mode;
+		s_status.mode = (W)(s_scan.req.mode & SCAN_MODE_MASK);
 		s_status.range_mm = s_scan.last_range;
 		s_status.pings = s_scan.pings;
+		app_task_time(TIM_SCAN, t0);
 	}
 }
