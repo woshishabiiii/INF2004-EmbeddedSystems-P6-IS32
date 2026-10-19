@@ -15,7 +15,7 @@
 #include "net_bridge.h"
 
 /* Topic prefix: replace g07 with your group number */
-#define TOPIC_PREFIX	"car/g07/"
+#define TOPIC_PREFIX	"car/g32/"
 
 LOCAL const char * const s_topic[3] = {
 	TOPIC_PREFIX "status",
