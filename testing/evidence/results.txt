@@ -1,0 +1,176 @@
+== message sizes ==
+version: V12 (JSON MQTT, unpacked records)
+APP_MSG (vc_event_q, telemetry_q)       16 B
+motion command (motion_cmd_q)           16 B
+motion snapshot (under mtx_snapshot)    88 B
+scan request (scan_request_q)           12 B
+obstacle profile (shared)               48 B
+MQTT telemetry, typical run            153 B
+MQTT status, typical run               126 B
+MQTT telemetry, longest values         180 B
+MQTT status, longest values            181 B
+MQTT event, mean of 12 types            40 B (longest 48 B)
+MQTT command ack                        46 B
+MQTT obstacle profile                  108 B
+MQTT run summary                       107 B (longest 132 B)
+MQTT timing record (every 5 s)         155 B (longest 199 B)
+MQTT command "16 SET base_speed 220"    21 B (text, up to 64 B)
+
+version: min-bit (binary MQTT, packed records)
+APP_MSG (vc_event_q, telemetry_q)        8 B
+motion command (motion_cmd_q)            8 B
+motion snapshot (under mtx_snapshot)    36 B
+scan request (scan_request_q)            4 B
+obstacle profile (under mtx_profile)    13 B
+MQTT telemetry, typical run             23 B
+MQTT status, typical run                18 B
+MQTT telemetry, longest values          23 B
+MQTT status, longest values             18 B
+MQTT event, mean of 12 types             9 B (longest 9 B)
+MQTT command ack                         6 B
+MQTT obstacle profile                   17 B
+MQTT run summary                        16 B (longest 16 B)
+MQTT timing record (every 5 s)          34 B (longest 34 B)
+MQTT command "16 SET base_speed 220"     4 B (binary, always)
+
+== CPU cost on the Cortex-M0+ at 125 MHz (emulator) ==
+V12:
+mqtt_command                969 instructions   1390 cycles   11.12 us (0 divides)
+mqtt_events_x12           13481 instructions  21164 cycles  169.31 us (253 divides)
+mqtt_status                3169 instructions   5081 cycles   40.65 us (53 divides)
+mqtt_telemetry             4686 instructions   7422 cycles   59.38 us (107 divides)
+snapshot_copy_in_lock       121 instructions    191 cycles    1.53 us (0 divides)
+status_read_imu              12 instructions     38 cycles    0.30 us (0 divides)
+status_read_line              8 instructions     26 cycles    0.21 us (0 divides)
+status_read_scan              8 instructions     19 cycles    0.15 us (0 divides)
+status_read_vc               12 instructions     33 cycles    0.26 us (0 divides)
+min-bit:
+app_msg_x12                2172 instructions   3247 cycles   25.98 us (0 divides)
+motion_cmd                  620 instructions    803 cycles    6.42 us (0 divides)
+mqtt_command                 84 instructions    126 cycles    1.01 us (0 divides)
+mqtt_events_x12            9505 instructions  12955 cycles  103.64 us (0 divides)
+mqtt_status                1290 instructions   1597 cycles   12.78 us (1 divides)
+mqtt_telemetry             1494 instructions   1833 cycles   14.66 us (1 divides)
+profile                    1552 instructions   1865 cycles   14.92 us (0 divides)
+snapshot_copy_in_lock        12 instructions     35 cycles    0.28 us (0 divides)
+snapshot_odo                 15 instructions     28 cycles    0.22 us (0 divides)
+snapshot_pack              1826 instructions   2280 cycles   18.24 us (0 divides)
+snapshot_unpack            1142 instructions   1311 cycles   10.49 us (0 divides)
+status_read_imu              58 instructions     95 cycles    0.76 us (0 divides)
+status_read_line             33 instructions     49 cycles    0.39 us (0 divides)
+status_read_scan             21 instructions     34 cycles    0.27 us (0 divides)
+status_read_vc               44 instructions     75 cycles    0.60 us (0 divides)
+status_write_imu            105 instructions    144 cycles    1.15 us (0 divides)
+status_write_line            52 instructions     77 cycles    0.62 us (0 divides)
+status_write_scan            26 instructions     40 cycles    0.32 us (0 divides)
+status_write_vc              56 instructions     84 cycles    0.67 us (0 divides)
+
+== RAM (firmware images, NET=lwip MQTT=1) ==
+V12      whole image: .data   204 + .bss  85436 =  85640 B static RAM
+min-bit  whole image: .data   148 + .bss  84948 =  85096 B static RAM
+
+application variables (app_program), per source file: V12 -> min-bit
+  app_common.c                      88 ->    44  (-44)
+  gpio_irq.c                       132 ->   130  (-2)
+  subsystem1/net_bridge.c           24 ->    11  (-13)
+  subsystem1/subsystem1.c           16 ->    16  (+0)
+  subsystem1/task_telemetry.c       38 ->    35  (-3)
+  subsystem2/drv_encoder.c          48 ->     6  (-42)
+  subsystem2/motion_api.c            4 ->     4  (+0)
+  subsystem2/subsystem2.c           20 ->    20  (+0)
+  subsystem2/task_motion.c         514 ->   473  (-41)
+  subsystem3/drv_barcode.c         524 ->   259  (-265)
+  subsystem3/subsystem3.c            8 ->     8  (+0)
+  subsystem3/task_line.c           282 ->   277  (-5)
+  subsystem4/drv_lsm303.c            4 ->     4  (+0)
+  subsystem4/subsystem4.c           16 ->    16  (+0)
+  subsystem4/task_imu.c            440 ->   446  (+6)
+  subsystem4/task_safety.c          78 ->    99  (+21)
+  subsystem5/drv_hcsr04.c           36 ->    32  (-4)
+  subsystem5/subsystem5.c           20 ->    24  (+4)
+  subsystem5/task_scan.c           480 ->   447  (-33)
+  subsystem5/task_vc.c             470 ->   493  (+23)
+  TOTAL                           3242 ->  2844  (-398)
+
+variables whose size changed (whole image):
+  app_program/app_common.c                 s_dropped             32 ->    16
+  app_program/app_common.c                 s_timing              56 ->    28
+  app_program/gpio_irq.c                   gpio_irq_max_us        4 ->     2
+  app_program/subsystem1/net_bridge.c      net_connects           4 ->     1
+  app_program/subsystem1/net_bridge.c      net_errors             4 ->     1
+  app_program/subsystem1/net_bridge.c      net_rx_drops           4 ->     1
+  app_program/subsystem1/net_bridge.c      net_up                 4 ->     0
+  app_program/subsystem1/task_telemetry.c  s_seq                  2 ->     1
+  app_program/subsystem1/task_telemetry.c  s_tx_drops             4 ->     2
+  app_program/subsystem2/drv_encoder.c     s_counts               0 ->     4
+  app_program/subsystem2/drv_encoder.c     s_enc                 48 ->     0
+  app_program/subsystem2/drv_encoder.c     s_stat                 0 ->     2
+  app_program/subsystem2/task_motion.c     s_enc                  0 ->    12
+  app_program/subsystem2/task_motion.c     s_seq                  2 ->     1
+  app_program/subsystem2/task_motion.c     s_snap                88 ->    36
+  app_program/subsystem3/drv_barcode.c     s_buf                512 ->   256
+  app_program/subsystem3/drv_barcode.c     s_head                 4 ->     1
+  app_program/subsystem3/drv_barcode.c     s_overflows            4 ->     1
+  app_program/subsystem3/drv_barcode.c     s_tail                 4 ->     1
+  app_program/subsystem3/task_line.c       s_seq                  2 ->     1
+  app_program/subsystem3/task_line.c       s_status              24 ->    16
+  app_program/subsystem3/task_line.c       s_status_w             0 ->     4
+  app_program/subsystem4/task_imu.c        s_seq_tel              2 ->     1
+  app_program/subsystem4/task_imu.c        s_seq_vc               2 ->     1
+  app_program/subsystem4/task_imu.c        s_status              40 ->    36
+  app_program/subsystem4/task_imu.c        s_status_w             0 ->    12
+  app_program/subsystem4/task_safety.c     s_health_ms           20 ->    10
+  app_program/subsystem4/task_safety.c     s_seq                  2 ->     1
+  app_program/subsystem4/task_safety.c     s_sm                  56 ->    88
+  app_program/subsystem5/drv_hcsr04.c      s_armed                4 ->     0
+  app_program/subsystem5/drv_hcsr04.c      s_count_at_trig        0 ->     4
+  app_program/subsystem5/drv_hcsr04.c      s_done                 4 ->     0
+  app_program/subsystem5/drv_hcsr04.c      s_echo                 0 ->     4
+  app_program/subsystem5/drv_hcsr04.c      s_t_fall               4 ->     0
+  app_program/subsystem5/subsystem5.c      mtx_profile            0 ->     4
+  app_program/subsystem5/task_scan.c       s_profile             48 ->    13
+  app_program/subsystem5/task_scan.c       s_seq_tel              2 ->     1
+  app_program/subsystem5/task_scan.c       s_seq_vc               2 ->     1
+  app_program/subsystem5/task_scan.c       s_status_w             0 ->     4
+  app_program/subsystem5/task_vc.c         s_seq_tel              2 ->     1
+  app_program/subsystem5/task_vc.c         s_status_w             0 ->    12
+  app_program/subsystem5/task_vc.c         s_vc                 432 ->   444
+  lib/liblwip/sysdepend/pico_rp2040/mqtt_utk.c count.0                4 ->     2
+  lib/liblwip/sysdepend/pico_rp2040/mqtt_utk.c payload.1            200 ->    34
+  TOTAL                                                       -566 B
+
+CPU cycles per second spent on the data representation (125 MHz)
+
+core 1                                                      V12    min-bit
+  Motion Control: snapshot out                 x50         9550     115750
+  Line: odometer in                            x200       38200      12600
+  Line: status out                             x200           0      15400
+  VC: odometer in (each 20 ms tick)            x50         9550       3150
+  VC: status out                               x50            0       4200
+  VC: IMU status in                            x50         1900       4750
+  VC -> Motion: speed command (at most)        x50            0      40150
+  total                                                   59200     196000 cycles/s
+                                                         0.047%     0.157% of the core (+0.109%)
+
+core 0                                                      V12    min-bit
+  IMU: snapshot in                             x100       19100     134600
+  IMU: VC status in                            x100        3300       7500
+  IMU: status out                              x100           0      14400
+  Obstacle Scan: snapshot in                   x100       19100     134600
+  Obstacle Scan: status out                    x100           0       4000
+  Telemetry: telemetry record                  x2         14844       3666
+  Telemetry: status record                     x1          5081       1597
+  Telemetry: snapshot in                       x3           573       4038
+  Telemetry: line, IMU, VC, scan status in     x3           348        759
+  total                                                   62346     305160 cycles/s
+                                                         0.050%     0.244% of the core (+0.194%)
+
+time added to each release of a control task (us)
+  Motion Control   every 20 ms    1.53 ->  18.52 us  (+16.99 us, +0.085% of the period)
+  Line             every  5 ms    1.53 ->   1.12 us  (-0.41 us, -0.008% of the period)
+  VC               every 20 ms    1.83 ->   1.94 us  (+0.10 us, +0.001% of the period)
+  IMU              every 10 ms    1.79 ->  12.52 us  (+10.73 us, +0.107% of the period)
+  Obstacle Scan    every 10 ms    1.53 ->  11.09 us  (+9.56 us, +0.096% of the period)
+
+each event published on MQTT: 1764 -> 1080 cycles (min-bit includes the 8 B APP_MSG pack and unpack)
+mtx_snapshot held for each copy: 191 -> 35 cycles (1.53 -> 0.28 us)

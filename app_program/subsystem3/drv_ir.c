@@ -29,10 +29,11 @@ EXPORT void ir_read_line(BOOL *left_black, BOOL *right_black)
 	*right_black = (((in >> LB_RIGHT_PIN) & 1U) == LB_BLACK_LEVEL) ? TRUE : FALSE;
 }
 
-EXPORT ER ir_barcode_ao(UINT n, UW *mean, UW *lo, UW *hi)
+EXPORT ER ir_barcode_ao(UINT n, UH *mean, UH *lo, UH *hi)
 {
 	ID	dd;
-	UW	v = 0U, sum = 0U;
+	UW	v = 0U, sum = 0U;	/* v: the ADC driver's word; sum: working value */
+	UH	a;
 	UINT	i, got = 0U;
 	SZ	asz;
 
@@ -45,10 +46,11 @@ EXPORT ER ir_barcode_ao(UINT n, UW *mean, UW *lo, UW *hi)
 	}
 	for (i = 0U; i < n; i++) {
 		if (tk_srea_dev(dd, LB_BC_ADC_CH, &v, 1, &asz) >= E_OK) {
-			sum += v;
+			a = (UH)(v & IR_ADC_MASK);	/* 12-bit reading */
+			sum += a;
 			got++;
-			*lo = (v < *lo) ? v : *lo;
-			*hi = (v > *hi) ? v : *hi;
+			*lo = (a < *lo) ? a : *lo;
+			*hi = (a > *hi) ? a : *hi;
 		}
 		(void)tk_dly_tsk(1);
 	}
@@ -56,6 +58,6 @@ EXPORT ER ir_barcode_ao(UINT n, UW *mean, UW *lo, UW *hi)
 	if (got == 0U) {
 		return E_IO;
 	}
-	*mean = sum / got;
+	*mean = (UH)(sum / got);
 	return E_OK;
 }

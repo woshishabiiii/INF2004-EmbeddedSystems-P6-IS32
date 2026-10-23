@@ -15,7 +15,7 @@
 #include "line_cfg.h"
 #include "drv_ir.h"
 #include "drv_barcode.h"
-#include "../subsystem2/subsystem2.h"	/* motion_get_snapshot(): odometer */
+#include "../subsystem2/subsystem2.h"	/* motion_get_odo(): odometer */
 #include "../subsystem4/subsystem4.h"	/* fault_flags, health_stamp() */
 #include "../subsystem5/subsystem5.h"	/* vc_event_q */
 
@@ -23,13 +23,15 @@
 
 LOCAL LC_CORE		s_lc;
 LOCAL BC_CORE		s_bc;
-LOCAL UH		s_seq;
-LOCAL LB_STATUS		s_status = {FALSE, FALSE, '-', 0U, 0U, 0U};
+LOCAL UB		s_seq;		/* 8-bit APP_MSG sequence, wraps */
+LOCAL LB_STATUS		s_status = {false, false, '-', 0U, 0U, 0U};	/* this task only */
+LOCAL volatile UW	s_status_w;	/* s_status packed: the copy telemetry reads */
+LOCAL BOOL		s_resend;	/* a LINE_STATUS was dropped: send it again */
 
 LOCAL const LC_PARAMS s_lc_params = {
 	LB_JUNCTION_MS,		/* junction_ms */
 	LB_JUNCTION_MM,		/* junction_mm */
-	LB_T_LOST_MS		/* lost_ms */
+	LB_LOST_MM		/* lost_mm */
 };
 
 LOCAL const BC_PARAMS s_bc_params = {
@@ -47,14 +49,38 @@ EXPORT void line_cyclic_handler(void *exinf)
 
 EXPORT void lb_get_status(LB_STATUS *out)
 {
-	*out = s_status;		/* single writer (this task); fields are words */
+	lc_status_unpack(s_status_w, out);	/* one 32-bit load; one writer (this task) */
 }
 
+/* Queue-overflow policy (evt_is_safety()): none of this task's events is a
+   safety event, so a full vc_event_q drops and counts them.  A dropped
+   LINE_STATUS is sent again on the next 5 ms cycle, so Vehicle Controller
+   never steers on a stale reading for longer than that. */
 LOCAL void send_events(const EVT_LIST *ev)
 {
-	if (app_send_list(vc_event_q, (UB)SRC_LINE, &s_seq, ev) != E_OK) {
+	UW	dropped = 0U;
+	UW	i;
+
+	if (app_send_events(vc_event_q, (UB)SRC_LINE, &s_seq, ev, &dropped) != E_OK) {
 		(void)tk_set_flg(fault_flags, FLT_QUEUE_OVF);
 	}
+	for (i = 0U; i < ev->n; i++) {
+		if ((ev->ev[i].type == (UB)EV_LINE_STATUS) && ((dropped & (1UL << i)) != 0U)) {
+			s_resend = TRUE;
+		}
+	}
+}
+
+LOCAL BOOL has_line_status(const EVT_LIST *ev)
+{
+	UW i;
+
+	for (i = 0U; i < ev->n; i++) {
+		if (ev->ev[i].type == (UB)EV_LINE_STATUS) {
+			return TRUE;
+		}
+	}
+	return FALSE;
 }
 
 /* Startup checks: report the barcode sensor's analogue level and the
@@ -62,7 +88,7 @@ LOCAL void send_events(const EVT_LIST *ev)
    line before power-up: both line sensors should then read white. */
 LOCAL void calibrate(void)
 {
-	UW	mean, lo, hi;
+	UH	mean, lo, hi;
 	BOOL	l, r;
 	ER	er = ir_barcode_ao(LB_CAL_SAMPLES, &mean, &lo, &hi);
 
@@ -79,12 +105,12 @@ LOCAL void calibrate(void)
 
 LOCAL void barcode_step(UW now_us)
 {
-	BC_EDGE		e;
+	UW		e;
 	BC_RESULT	res;
 	EVT_LIST	ev;
 
 	while (barcode_pop(&e)) {
-		bc_edge(&s_bc, e.t_us, e.level);
+		bc_edge(&s_bc, e & BC_EDGE_TIME, ((e & BC_EDGE_LEVEL) != 0U) ? 1U : 0U);
 	}
 	if (bc_poll(&s_bc, now_us, &res)) {
 		evt_list_clear(&ev);
@@ -107,7 +133,7 @@ LOCAL void barcode_step(UW now_us)
 EXPORT void line_task(INT stacd, void *exinf)
 {
 	EVT_LIST	ev;
-	MC_SNAPSHOT	snap = {0};
+	W		odo_mm = 0;
 	UW		overflows = 0U;
 	BOOL		l, r;
 
@@ -120,31 +146,54 @@ EXPORT void line_task(INT stacd, void *exinf)
 		(void)tk_set_flg(fault_flags, FLT_LINE);
 	}
 	calibrate();
-	lc_init(&s_lc, &s_lc_params, app_ms());
+	(void)motion_get_odo(&odo_mm);	/* the T_lost distance starts here */
+	lc_init(&s_lc, &s_lc_params, odo_mm);
 	bc_init(&s_bc, &s_bc_params);
 
+	s_status_w = lc_status_pack(&s_status);
 	while (1) {
+		UW	t0;
+		INT	missed;
+
 		(void)tk_slp_tsk(TMO_FEVR);
-		(void)tk_can_wup(TSK_SELF);	/* never "catch up" after a delay */
+		t0 = app_us();
+		missed = tk_can_wup(TSK_SELF);	/* never "catch up" after a delay */
+		if (missed > 0) {
+			app_task_overrun(TIM_LINE, (UW)missed);
+		}
 
 		/* Region A */
 		ir_read_line(&l, &r);
-		(void)motion_get_snapshot(&snap);	/* on failure: keep the last one */
+		(void)motion_get_odo(&odo_mm);	/* on failure: keep the last one */
 		evt_list_clear(&ev);
-		lc_step(&s_lc, (l != FALSE), (r != FALSE), app_ms(), snap.odo_mm, &ev);
-		s_status.left_black = l;
-		s_status.right_black = r;
+		lc_step(&s_lc, (l != FALSE), (r != FALSE), app_ms(), odo_mm, &ev);
+		if (s_resend && !has_line_status(&ev)) {
+			(void)evt_list_add(&ev, (UB)EV_LINE_STATUS, (l != FALSE) ? 1 : 0, (r != FALSE) ? 1 : 0);
+		}
+		s_resend = FALSE;
+		s_status.left_black = (l != FALSE);
+		s_status.right_black = (r != FALSE);
 		s_status.junctions = s_lc.junctions;
 		send_events(&ev);
 
 		/* Region B */
 		barcode_step(app_us());
 		if (barcode_overflows() != overflows) {
+			/* Edges were lost: this capture cannot be decoded.  Abandon
+			   it and report it; the car carries on (a missed barcode is
+			   a mission problem, not a safety fault). */
 			overflows = barcode_overflows();
-			tm_printf((UB*)"[LB] edge_buf overflow\n");
-			(void)tk_set_flg(fault_flags, FLT_LINE);
+			bc_reset(&s_bc);
+			s_bc.failed++;
+			s_status.reads_failed = s_bc.failed;
+			evt_list_clear(&ev);
+			(void)evt_list_add(&ev, (UB)EV_BARCODE_BAD, BC_REASON_OVERFLOW, 0);
+			send_events(&ev);
+			tm_printf((UB*)"[LB] edge_buf overflow: capture abandoned\n");
 		}
 
+		s_status_w = lc_status_pack(&s_status);	/* one 32-bit store */
 		health_stamp(HEALTH_LINE);
+		app_task_time(TIM_LINE, t0);
 	}
 }

@@ -1,0 +1,11 @@
+# min-bit-v12 at 762f29f (Change Requirement 1, 162 checks): the same 6 cars as V12's run 3 (python3 sweep.py 7 6)
+100 215 1.51 135 1.90 0.93 SIMULATION: 162 checks, 2 failed
+     [FAIL] line_gap_fast    drove across a 60 mm gap
+     [FAIL] line_gap_fast    following after the gap
+101 221 1.44 132 1.89 0.92 SIMULATION: 162 checks, 0 failed
+102 180 1.46 130 2.08 0.87 SIMULATION: 162 checks, 0 failed
+103 201 1.84 141 2.02 0.91 SIMULATION: 162 checks, 0 failed
+104 307 1.43 139 1.95 0.87 SIMULATION: 162 checks, 0 failed
+105 186 1.62 138 1.92 0.94 SIMULATION: 162 checks, 0 failed
+TOTAL: 6 cars, 5 with 0 failed checks
+# same as V12: only car 100 at 300 mm/s fails line_gap_fast (known, see V12 run 3 in 2026-10-23_robustness.txt)

@@ -19,7 +19,9 @@
 #include <stdbool.h>
 
 #define OS_MAX_POINTS		64U
-#define OS_INVALID		(-1)	/* range value for "no echo": unknown, NOT free */
+#define OS_INVALID		4095	/* range value for "no echo": unknown, NOT free.
+					   Ranges are 12-bit unsigned (0..4,000 mm), so
+					   "none" is the all-ones value, not -1. */
 #define OS_CLEAR_OPEN		1000	/* clearance when nothing was seen on that side, mm */
 
 typedef struct {
@@ -36,6 +38,31 @@ typedef struct {
 	uint32_t	unknown_right;	/* ... beyond the right edge */
 	uint32_t	npoints;	/* valid readings used */
 } OS_PROFILE;
+
+/* The profile, packed (48 B -> 13 B), as Obstacle Scan shares it with
+   Vehicle Controller and Telemetry under mtx_profile.  97 bits, LSB first
+   (bitpack.h); signed values with an offset; values outside saturate.
+     valid            1
+     x_left_mm       11   -1024..1023  (|x| <= OS_R_MAX_MM = 800)
+     x_right_mm      11   -1024..1023
+     width_mm        11   0..2047
+     x_center_mm     11   -1024..1023
+     closest_mm      10   0..1023      (farther than 800 is background)
+     closest_deg      7   30..157      (servo angles 30..150), stored - 30
+     left_clear_mm   10   0..1023      (OS_CLEAR_OPEN = 1000)
+     right_clear_mm  10   0..1023
+     unknown_left     5   0..31        } a scan gives at most SCAN_SLOTS = 25
+     unknown_right    5   0..31        } points (scan_core.h; scan_core.c
+     npoints          5   0..31        } checks it when it compiles)        */
+#define OS_PROFILE_PK_BYTES	13U
+#define OS_PK_COUNT_BITS	5U	/* unknown_left, unknown_right, npoints */
+
+typedef struct {
+	uint8_t		b[OS_PROFILE_PK_BYTES];
+} OS_PROFILE_PK;
+
+void	os_profile_pack(const OS_PROFILE *p, OS_PROFILE_PK *pk);
+void	os_profile_unpack(const OS_PROFILE_PK *pk, OS_PROFILE *p);
 
 /* Points must be sorted by angle (ascending).  Ranges beyond r_max_mm are
    background, not obstacle; OS_INVALID ranges are unknown.

@@ -30,15 +30,9 @@
 /* The line-following rule's tuning (line_cfg.h), for Vehicle Controller */
 IMPORT const LS_PARAMS	lb_steer_params;
 
-/* Latest line and barcode state, for telemetry (one writer: this task) */
-typedef struct {
-	BOOL	left_black;
-	BOOL	right_black;
-	char	last_char;	/* last decoded character, '-' if none */
-	UW	reads_ok;
-	UW	reads_failed;
-	UW	junctions;
-} LB_STATUS;
+/* Latest line and barcode state, for telemetry: shared as one packed
+   word (LC_STATUS in line_core.h), unpacked by lb_get_status(). */
+typedef LC_STATUS LB_STATUS;
 
 IMPORT void	lb_get_status(LB_STATUS *out);
 

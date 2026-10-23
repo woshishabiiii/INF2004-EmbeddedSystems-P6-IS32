@@ -7,8 +7,10 @@
  *
  *	Wake-ups:
  *	  - every 20 ms from the cyclic handler (s_tick = TRUE): full control step;
- *	  - at once from motion_stop() / motion_fault_stop(): stop bits only,
- *	    so a stop is acted on within microseconds, not at the next tick.
+ *	  - at once from motion_stop() / motion_fault_stop(): stop bits, so a
+ *	    stop is acted on within microseconds, not at the next tick;
+ *	  - at once from motion_hold_speed(): the new wheel speeds are applied
+ *	    straight away (steering does not wait for the tick).
  */
 
 #include "subsystem2.h"
@@ -24,8 +26,9 @@ IMPORT volatile UW	mc_stop_req_us;	/* motion_api.c */
 
 LOCAL volatile UW	s_ticks;	/* counted by the cyclic handler (one writer) */
 LOCAL MC_CORE		s_core;
-LOCAL MC_SNAPSHOT	s_snap;		/* dist_snapshot, guarded by mtx_snapshot */
-LOCAL UH		s_seq;
+LOCAL MC_SNAP_PK	s_snap;		/* dist_snapshot, packed, guarded by mtx_snapshot */
+LOCAL MC_ENC		s_enc;		/* 32-bit positions from the 16-bit encoder word */
+LOCAL UB		s_seq;		/* 8-bit APP_MSG sequence, wraps */
 
 LOCAL const MC_PARAMS s_params = {
 	MC_COUNTS_PER_M,	/* counts_per_m */
@@ -45,8 +48,28 @@ LOCAL const MC_PARAMS s_params = {
 	MC_STALL_SPEED,		/* stall_speed */
 	MC_STALL_TICKS,		/* stall_ticks */
 	MC_TIMEOUT_MARGIN_MS,	/* timeout_margin_ms */
-	MC_SPEED_WINDOW		/* speed_window */
+	MC_SPEED_WINDOW,	/* speed_window */
+	MC_DUTY_RISE,		/* duty_rise */
+	MC_STOP_COAST,		/* stop_coast */
+	MC_STEER_PM_MM		/* steer_pm_mm */
 };
+
+/* Own fault bits (3, mc_core.h) -> their bits in the shared fault bitmask */
+LOCAL UINT fault_flag_for(UW mc_bits)
+{
+	UINT flags = 0U;
+
+	if ((mc_bits & MC_FLT_STALL) != 0U) {
+		flags |= FLT_STALL;
+	}
+	if ((mc_bits & MC_FLT_TIMEOUT) != 0U) {
+		flags |= FLT_MOVE_TIMEOUT;
+	}
+	if ((mc_bits & MC_FLT_ENCODER) != 0U) {
+		flags |= FLT_ENCODER;
+	}
+	return flags;
+}
 
 EXPORT void motion_cyclic_handler(void *exinf)
 {
@@ -57,11 +80,26 @@ EXPORT void motion_cyclic_handler(void *exinf)
 
 EXPORT ER motion_get_snapshot(MC_SNAPSHOT *out)
 {
-	ER er = tk_loc_mtx(mtx_snapshot, 2);
+	MC_SNAP_PK	copy;
+	ER		er = tk_loc_mtx(mtx_snapshot, 2);
 
 	if (er == E_OK) {
-		*out = s_snap;
+		copy = s_snap;			/* 36 B, whole words, no read-modify-write */
 		(void)tk_unl_mtx(mtx_snapshot);
+		mc_snap_unpack(&copy, out);	/* outside the lock */
+	}
+	return er;
+}
+
+EXPORT ER motion_get_odo(W *odo_mm)
+{
+	MC_SNAP_PK	copy;
+	ER		er = tk_loc_mtx(mtx_snapshot, 2);
+
+	if (er == E_OK) {
+		copy = s_snap;			/* 36 B, whole words */
+		(void)tk_unl_mtx(mtx_snapshot);
+		*odo_mm = (W)mc_snap_odo(&copy);	/* outside the lock */
 	}
 	return er;
 }
@@ -78,6 +116,7 @@ LOCAL void load_params(void)
 EXPORT void motion_task(INT stacd, void *exinf)
 {
 	MC_CMD	cmds[8];
+	MC_CMD_PK pk;
 	MC_IN	in;
 	MC_OUT	out;
 	BOOL	was_cmd_stop = TRUE;
@@ -96,10 +135,11 @@ EXPORT void motion_task(INT stacd, void *exinf)
 	}
 	if (er != E_OK) {
 		tm_printf((UB*)"[MC] encoder set-up failed: %d\n", er);
-		(void)tk_set_flg(fault_flags, FLT_MOTION);
+		(void)tk_set_flg(fault_flags, FLT_ENCODER);
 	}
-	in.count[MC_LEFT] = encoder_count(ENC_LEFT);
-	in.count[MC_RIGHT] = encoder_count(ENC_RIGHT);
+	mc_enc_init(&s_enc, encoder_word());
+	in.count[MC_LEFT] = s_enc.pos[MC_LEFT];
+	in.count[MC_RIGHT] = s_enc.pos[MC_RIGHT];
 	mc_core_init(&s_core, &s_params, in.count);
 	tm_printf((UB*)"[MC] ready: %d counts/m, %d counts per 90 deg\n",
 		  MC_COUNTS_PER_M, MC_COUNTS_PER_90DEG);
@@ -108,28 +148,36 @@ EXPORT void motion_task(INT stacd, void *exinf)
 		T_RFLG	rflg;
 		UINT	flags = 0U;
 
-		(void)tk_slp_tsk(TMO_FEVR);
+		UW	t0;
+		UW	missed;
 
-		/* Inputs: stop bits on EVERY wake-up, commands only on a tick */
+		(void)tk_slp_tsk(TMO_FEVR);
+		t0 = app_us();
+
+		/* Inputs: stop bits and new commands on EVERY wake-up */
 		if (tk_ref_flg(stop_flags, &rflg) == E_OK) {
 			flags = rflg.flgptn;
 		}
 		in.now_ms = app_ms();
 		in.now_us = app_us();
-		in.count[MC_LEFT] = encoder_count(ENC_LEFT);
-		in.count[MC_RIGHT] = encoder_count(ENC_RIGHT);
+		mc_enc_update(&s_enc, encoder_word());	/* one load: both wheels */
+		in.count[MC_LEFT] = s_enc.pos[MC_LEFT];
+		in.count[MC_RIGHT] = s_enc.pos[MC_RIGHT];
 		in.cmd_stop = ((flags & MC_CMD_STOP) != 0U);
 		in.fault_stop = ((flags & MC_FAULT_STOP) != 0U);
 		in.stop_req_us = mc_stop_req_us;
-		in.tick = (s_ticks != seen_ticks);	/* a 20 ms release (not just a stop) */
+		missed = s_ticks - seen_ticks;
+		in.tick = (missed != 0U);		/* a 20 ms release (not just a wake-up) */
+		if (missed > 1U) {
+			app_task_overrun(TIM_MOTION, missed - 1U);	/* a tick came while busy */
+		}
 		seen_ticks = s_ticks;
 		in.ncmd = 0U;
 		in.cmd = cmds;
-		if (in.tick) {
-			while ((in.ncmd < 8U) &&
-			       (tk_rcv_mbf(motion_cmd_q, &cmds[in.ncmd], TMO_POL) == (INT)sizeof(MC_CMD))) {
-				in.ncmd++;
-			}
+		while ((in.ncmd < 8U) &&
+		       (tk_rcv_mbf(motion_cmd_q, &pk, TMO_POL) == (INT)sizeof(MC_CMD_PK))) {
+			mc_cmd_unpack(&pk, &cmds[in.ncmd]);
+			in.ncmd++;
 		}
 		if (was_cmd_stop && !in.cmd_stop && !in.fault_stop) {
 			load_params();			/* released at START */
@@ -139,37 +187,55 @@ EXPORT void motion_task(INT stacd, void *exinf)
 		mc_core_step(&s_core, &in, &out);
 
 		/* Outputs: motors first */
-		motor_set(MOTOR_LEFT, out.duty[MC_LEFT]);
-		motor_set(MOTOR_RIGHT, out.duty[MC_RIGHT]);
+		if (out.coast) {
+			motor_coast(MOTOR_LEFT);	/* CMD_STOP: roll to a stop */
+			motor_coast(MOTOR_RIGHT);
+		} else {
+			motor_set(MOTOR_LEFT, out.duty[MC_LEFT]);
+			motor_set(MOTOR_RIGHT, out.duty[MC_RIGHT]);
+		}
 
 		if (out.flush) {
-			MC_CMD discard;
-
-			while (tk_rcv_mbf(motion_cmd_q, &discard, TMO_POL) > 0) {
+			while (tk_rcv_mbf(motion_cmd_q, &pk, TMO_POL) > 0) {
 				/* stale commands are never run after a stop */
 			}
 		}
 		if ((out.stop_latency_us != 0U) && (in.stop_req_us != 0U)) {
-			tm_printf((UB*)"[MC] %s: duty 0 after %u us\n",
+			/* the 6-bit skipped-edge counts too (INT-21: they stay 0) */
+			tm_printf((UB*)"[MC] %s: duty 0 after %u us, encoder errors %u/%u\n",
 				  in.fault_stop ? (UB*)"FAULT_STOP" : (UB*)"CMD_STOP",
-				  out.stop_latency_us);
+				  out.stop_latency_us, encoder_errors(ENC_LEFT), encoder_errors(ENC_RIGHT));
 		}
 		if (out.fault) {
 			(void)motion_fault_stop();
-			(void)tk_set_flg(fault_flags, FLT_MOTION);
-			tm_printf((UB*)"[MC] FAULT %d (1 stall, 2 timeout, 3 encoder direction)\n",
-				  s_core.snap.fault_code);
+			(void)tk_set_flg(fault_flags, fault_flag_for(s_core.snap.fault_bits));
+			tm_printf((UB*)"[MC] FAULT 0x%x (1 stall, 2 timeout, 4 encoder direction)\n",
+				  s_core.snap.fault_bits);
+			if ((s_core.snap.fault_bits & MC_FLT_ENCODER) != 0U) {
+				/* say which wheel, and what to change */
+				tm_printf((UB*)"[MC] driven forward, measured: left %d mm/s, right %d mm/s\n",
+					  s_core.w[MC_LEFT].speed, s_core.w[MC_RIGHT].speed);
+				tm_printf((UB*)"[MC] a NEGATIVE wheel: if it really rolls forward, flip its "
+					  "ENC_SIGN_ in drv_encoder.c; if it rolls backward, flip its "
+					  "MOTOR_DIR_ in drv_motor.c\n");
+			}
 		}
-		if (app_send_list(vc_event_q, (UB)SRC_MOTION, &s_seq, &out.ev) != E_OK) {
+		/* EV_STOP_ACK must arrive; a lost EV_DONE is covered by Vehicle
+		   Controller's time limits (evt_is_safety()) */
+		if (app_send_events(vc_event_q, (UB)SRC_MOTION, &s_seq, &out.ev, NULL) != E_OK) {
 			(void)tk_set_flg(fault_flags, FLT_QUEUE_OVF);
 		}
 
 		if (in.tick) {
+			MC_SNAP_PK packed;
+
+			mc_snap_pack(&s_core.snap, &packed);	/* outside the lock */
 			if (tk_loc_mtx(mtx_snapshot, 2) == E_OK) {
-				s_snap = s_core.snap;
+				s_snap = packed;
 				(void)tk_unl_mtx(mtx_snapshot);
 			}
 			health_stamp(HEALTH_MOTION);
 		}
+		app_task_time(TIM_MOTION, t0);
 	}
 }

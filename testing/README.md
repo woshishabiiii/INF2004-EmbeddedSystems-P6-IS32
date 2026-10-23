@@ -12,6 +12,7 @@ testing/
 ├── ...
 ├── subsystem5/
 ├── integration/           tests across two or more subsystems (shared)
+├── evidence/              Week 13 minimum-bit evidence: the tools behind ../MIN_BIT_EVIDENCE.md
 └── system/                tests of the whole product against its requirements (shared)
 ```
 

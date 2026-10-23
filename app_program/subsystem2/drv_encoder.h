@@ -17,12 +17,22 @@
    gpio_irq_start() must also have been called (from a core-1 task). */
 IMPORT ER	encoder_init(void);
 
-/* Signed count since start-up: + = forward after sign calibration.
-   Reading a 32-bit word is atomic, so no lock is needed. */
-IMPORT W	encoder_count(UINT side);
+/* Both wheels' counts in one word: left = bits 0-15, right = bits 16-31,
+   each a 16-bit count that wraps (+ = forward after sign calibration).
+   Only the GPIO interrupt writes it, each half with a 16-bit store, so no
+   read-modify-write; this is one 32-bit load, so both counts are from the
+   same moment.  Motion Control turns it into 32-bit positions
+   (mc_enc_update() in mc_core.c). */
+IMPORT UW	encoder_word(void);
 
-/* Transitions that skipped a state (both pins changed between two
-   interrupts).  Should stay at 0; if it grows, edges are being lost. */
+/* Per-wheel status byte, also written only by the interrupt:
+     bits 0-1  last (A << 1) | B state
+     bits 2-7  transitions that skipped a state (both pins changed between
+               two interrupts), stops at 63.  Should stay at 0; if it
+               grows, edges are being lost. */
+#define ENC_STAT_STATE_MASK	0x03U
+#define ENC_STAT_ERR_SHIFT	2U
+#define ENC_STAT_ERR_MAX	63U
 IMPORT UW	encoder_errors(UINT side);
 
 #endif /* DRV_ENCODER_H */

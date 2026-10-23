@@ -2,7 +2,9 @@
  *	os_profile.c  (see os_profile.h)
  */
 
+#include <string.h>
 #include "os_profile.h"
+#include "../bitpack.h"
 
 #define CLUSTER_DR_MM	80	/* neighbours closer than this in range = same object */
 #define LOOKAHEAD_MM	300	/* only objects this far past the nearest point limit a gap */
@@ -164,4 +166,52 @@ void os_build_profile(const int32_t angle_deg[], const int32_t range_mm[],
 		}
 	}
 	p->valid = true;
+}
+
+/* ---- packed profile (os_profile.h) --------------------------------------- */
+BP_STATIC_ASSERT(sizeof(OS_PROFILE_PK) == 13U, os_profile_pk_is_13_bytes);
+
+#define OPK_X_BITS	11U
+#define OPK_X_MIN	(-1024)
+#define OPK_DEG_MIN	30	/* servo angles 30..150 */
+
+void os_profile_pack(const OS_PROFILE *p, OS_PROFILE_PK *pk)
+{
+	BP_W w;
+
+	memset(pk, 0, sizeof(*pk));
+	w.rec = pk->b;
+	w.pos = 0U;
+	bp_wraw(&w, 1U, p->valid ? 1U : 0U);
+	bp_ws(&w, OPK_X_BITS, OPK_X_MIN, p->x_left_mm);
+	bp_ws(&w, OPK_X_BITS, OPK_X_MIN, p->x_right_mm);
+	bp_wu(&w, 11U, p->width_mm);
+	bp_ws(&w, OPK_X_BITS, OPK_X_MIN, p->x_center_mm);
+	bp_wu(&w, 10U, p->closest_mm);
+	bp_ws(&w, 7U, OPK_DEG_MIN, p->closest_deg);
+	bp_wu(&w, 10U, p->left_clear_mm);
+	bp_wu(&w, 10U, p->right_clear_mm);
+	bp_wu(&w, OS_PK_COUNT_BITS, (int32_t)p->unknown_left);
+	bp_wu(&w, OS_PK_COUNT_BITS, (int32_t)p->unknown_right);
+	bp_wu(&w, OS_PK_COUNT_BITS, (int32_t)p->npoints);
+}
+
+void os_profile_unpack(const OS_PROFILE_PK *pk, OS_PROFILE *p)
+{
+	BP_R r;
+
+	r.rec = pk->b;
+	r.pos = 0U;
+	p->valid = (bp_ru(&r, 1U) != 0U);
+	p->x_left_mm = bp_rs(&r, OPK_X_BITS, OPK_X_MIN);
+	p->x_right_mm = bp_rs(&r, OPK_X_BITS, OPK_X_MIN);
+	p->width_mm = (int32_t)bp_ru(&r, 11U);
+	p->x_center_mm = bp_rs(&r, OPK_X_BITS, OPK_X_MIN);
+	p->closest_mm = (int32_t)bp_ru(&r, 10U);
+	p->closest_deg = bp_rs(&r, 7U, OPK_DEG_MIN);
+	p->left_clear_mm = (int32_t)bp_ru(&r, 10U);
+	p->right_clear_mm = (int32_t)bp_ru(&r, 10U);
+	p->unknown_left = bp_ru(&r, OS_PK_COUNT_BITS);
+	p->unknown_right = bp_ru(&r, OS_PK_COUNT_BITS);
+	p->npoints = bp_ru(&r, OS_PK_COUNT_BITS);
 }

@@ -115,3 +115,24 @@ void sm_on_poll(SM_CORE *s, uint32_t btn_start, uint32_t btn_stop,
 		}
 	}
 }
+
+void sm_health_ages(SM_CORE *s, uint32_t now_ms, const uint16_t stamp[HEALTH_SLOTS],
+		    uint32_t age_ms[HEALTH_SLOTS], bool alive[HEALTH_SLOTS])
+{
+	uint32_t i;
+
+	for (i = 0U; i < HEALTH_SLOTS; i++) {
+		alive[i] = (stamp[i] != 0U);
+		if (!alive[i]) {
+			age_ms[i] = 0U;
+		} else if (stamp[i] != s->h_last[i]) {
+			int32_t d = (int32_t)(int16_t)(uint16_t)((uint16_t)now_ms - stamp[i]);
+
+			age_ms[i] = (d > 0) ? (uint32_t)d : 0U;
+			s->h_last[i] = stamp[i];
+			s->h_seen_ms[i] = now_ms - age_ms[i];
+		} else {
+			age_ms[i] = now_ms - s->h_seen_ms[i];
+		}
+	}
+}

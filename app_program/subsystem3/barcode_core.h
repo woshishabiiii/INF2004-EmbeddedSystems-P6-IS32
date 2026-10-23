@@ -23,6 +23,11 @@
 
 #define BC_MAX_EDGES	40U	/* a Code 39 "*X*" has 30; more = not a barcode */
 
+/* EV_BARCODE_BAD.p1 when edges were lost because the interrupt's ring
+   buffer overflowed: that capture is abandoned (a mission-level failure,
+   not a fault -- the car carries on; design-review feedback IS32) */
+#define BC_REASON_OVERFLOW	100
+
 /* Navigation commands (EV_BARCODE.p2) */
 #define LB_CMD_NONE		0	/* valid barcode, but no command (e.g. 'Z') */
 #define LB_CMD_TURN_LEFT	1	/* 'A' */

@@ -24,3 +24,10 @@ config/wifi_secrets.h
 
 # macOS
 .DS_Store
+
+# Host test binaries
+testing/host/sim
+testing/host/unit_tests
+testing/host/obj/
+testing/host/vectors.txt
+__pycache__/

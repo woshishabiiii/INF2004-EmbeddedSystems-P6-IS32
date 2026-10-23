@@ -11,12 +11,15 @@
 #define VC_TICK_MS		20	/* timers and steering refresh */
 
 /* ---- speeds, mm/s ------------------------------------------------------- */
-#define VC_BASE_SPEED		200	/* line following (SET base_speed)      TUNE */
-#define VC_SLOW_SPEED		120	/* something ahead within the slow zone  TUNE */
-#define VC_HUMP_SPEED		150	/* on a hump: straight, encoder heading  TUNE */
-#define VC_JUNCTION_SPEED	150	/* barcode command waiting for its junction */
-#define VC_MOVE_SPEED		150	/* distance moves (junctions, bypass legs) */
-#define VC_FIND_SPEED		120	/* creeping toward the line after a bypass */
+/* VC_BASE_SPEED is also the car's SPEED LIMIT: every other speed below is
+   capped at it, so "SET base_speed 80" slows everything (moves, humps,
+   junctions), not just line following. */
+#define VC_BASE_SPEED		140	/* line following (SET base_speed)      TUNE */
+#define VC_SLOW_SPEED		90	/* something ahead within the slow zone  TUNE */
+#define VC_HUMP_SPEED		100	/* on a hump: straight, encoder heading  TUNE */
+#define VC_JUNCTION_SPEED	100	/* barcode command waiting for its junction */
+#define VC_MOVE_SPEED		100	/* distance moves (junctions, bypass legs) */
+#define VC_FIND_SPEED		80	/* creeping toward the line after a bypass */
 
 /* ---- geometry ----------------------------------------------------------- */
 #define VC_CAR_WIDTH_MM		160	/* widest point of the car               MEASURE */
@@ -28,13 +31,19 @@
 #define VC_LINE_HALF_MM		9	/* half the 18 mm line */
 
 /* ---- obstacles ------------------------------------------------------------ */
-#define VC_STOP_MM		250	/* ALERT distance while following (SET stop_mm)  TUNE */
+#define VC_STOP_MM		150	/* ALERT distance while following (SET stop_mm)  TUNE */
 #define VC_BYPASS_STOP_MM	120	/* ALERT distance during a bypass         TUNE */
 #define VC_BYPASS_DEG		45	/* angle of the sideways legs */
 #define VC_BACK_MM		150	/* reverse this far before scanning again */
 #define VC_N_RETRY		2	/* reverse-and-retry attempts */
 #define VC_TIE_MM		20	/* detours within this of each other count as equal */
 #define VC_PREF_SIDE		(-1)	/* -1 pass on the left, +1 right, when equal */
+/* Line search: spin on the spot, sweeping ever wider either side of where
+   the line was lost: +step, -step, +2 step, -2 step, ... up to +-max, so a
+   nearby line is found quickly and +-180 covers the whole circle.  max must
+   be a multiple of step and at most 180 (the last spin is 2 x max). */
+#define VC_SEARCH_STEP_DEG	180	/* first sweep, and how much wider each one gets  TUNE */
+#define VC_SEARCH_MAX_DEG	180	/* widest sweep either side (180 = full circle)   TUNE */
 #define VC_FIND_EXTRA_MM	150	/* search this much past where the line should be */
 #define VC_ALIGN_EXTRA_MM	10	/* drive on after touching the line, then turn */
 
@@ -46,12 +55,17 @@
 
 /* ---- time limits, ms ------------------------------------------------------ */
 #define VC_T_STARTUP_MS		3000	/* sensors must be ready by then */
-#define VC_T_ACK_MS		1500	/* stop -> STOP_ACK */
+#define VC_T_ACK_MS		1500	/* stop -> STOP_ACK: Motion Control's answer, on top of
+					   2 x (speed / its ramp rate) for the car to slow down */
 #define VC_T_SCAN_MS		10000	/* request -> PROFILE */
-#define VC_T_SEARCH_MS		8000	/* whole line search */
-#define VC_T_EXEC_MS		6000	/* whole barcode command */
-#define VC_T_BYPASS_MS		20000	/* bypass and line recovery */
-#define VC_HUMP_GRACE_MS	500	/* after a hump, before line loss counts again */
+/* No fixed time for a barcode command, a line search or a bypass: each
+   move or turn has a watchdog of 2 x its own expected time (wheel travel
+   / its speed) + VC_STEP_MARGIN_MS, so slower speeds, longer detours and
+   bigger turns automatically get more time.  The three limits above are
+   watchdogs on other tasks answering (sensors, Motion Control, the scan),
+   not on how fast the car drives. */
+#define VC_STEP_MARGIN_MS	2000	/* more than Motion Control's own margin  TUNE */
+#define VC_HUMP_GRACE_MM	100	/* after a hump: travel before line loss counts again */
 #define VC_HOLD_REFRESH_MS	200	/* re-send the wheel speeds at least this often */
 
 #endif /* VC_CFG_H */

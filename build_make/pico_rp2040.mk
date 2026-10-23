@@ -91,6 +91,12 @@ ifeq ($(TEST),1)
 TEST_SUFFIX := _test
 endif
 
+# The JSON=1 debug build was removed: MQTT is binary only (Change
+# Requirement 1).  tools/mqtt_decode.py shows every record as named fields.
+ifneq ($(JSON),)
+$(error JSON=$(JSON): the JSON debug build was removed, MQTT is binary only; read the car with tools/mqtt_decode.py)
+endif
+
 # CRASH_REPORT=1 also copies every console line to UART0 on GP0 (TX) /
 # GP1 (RX), 115200 8N1.  UART output is sent immediately, so it still shows
 # the last messages and the kernel's crash report after a crash, when the
@@ -209,7 +215,7 @@ endif
 # before any recipe executes.
 ################################################################################
 
-PROFILE_ID := smp$(SMP)-$(CONSOLE)-wifi$(WIFI)-net$(NET)-mqtt$(MQTT)-crash$(CRASH_REPORT)-test$(TEST)
+PROFILE_ID := smp$(SMP)-$(CONSOLE)-wifi$(WIFI)-net$(NET)-mqtt$(MQTT)-crash$(CRASH_REPORT)-test$(TEST)-json$(JSON)
 PROFILE_FILE := .build_profile
 
 ifneq ($(strip $(shell cat $(PROFILE_FILE) 2>/dev/null)),$(PROFILE_ID))

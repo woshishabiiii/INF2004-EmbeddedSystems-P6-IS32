@@ -2,7 +2,7 @@
 
 The firmware keeps every subsystem's **logic** in plain C files with no
 kernel calls (`*_core.c`, `code39.c`, `os_profile.c`, `imu_math.c`,
-`cmd_parse.c`, `tel_json.c`). This folder compiles exactly those files for
+`cmd_parse.c`, `tel_bin.c`). This folder compiles exactly those files for
 your laptop and tests them. Nothing here is flashed, and nothing here is
 compiled into the firmware (the firmware build only takes `app_program/`).
 
@@ -49,15 +49,22 @@ Safety Monitor's latch.
 
 | Scenario | What it shows |
 |---|---|
-| `oval_left`, `oval_right`, `oval_tight`, `oval_fast`, `oval_slow` | line following on R 300 / 200 mm loops at 120–300 mm/s |
+| `oval_left`, `oval_right`, `oval_tight`, `oval_fast`, `oval_slow` | line following on R 300 / 200 mm loops at 80–300 mm/s; smooth wheels: no wheel above base_speed and no sudden target change bigger than `MC_STEER_PM_MM` allows |
 | `barcode_A`, `_B`, `_C`, `_D`, `_Z`, `barcode_A_back` | decode at speed, run the command at the junction, follow the new branch |
-| `obstacle_mid`, `obstacle_right`, `obstacle_wall` | stop, profile, choose a side, bypass, find and rejoin the line |
+| `obstacle_mid`, `obstacle_right`, `obstacle_wall` | stop (at rest 150 ± 40 mm from the box), profile, choose a side, bypass, find and rejoin the line |
 | `hump` | a short and a long hump: heights and the highest hump |
-| `dead_end` | line search fails, Safe Stop, RESTART, START |
+| `dead_end` | all three search spins, then HALTED (a mission failure, nothing latched), START carries on |
 | `stop_start` | STOP latency, repeated command, SET, STOP button, FINISH |
 | `imu_fault` | sensor failure, restart refused until it recovers |
 | `impact` | an obstacle the sonar cannot see: collision detected, Safe Stop |
 | `line_gap` | a 60 mm gap in the line |
+| `barcode_A_slow`, `barcode_B_fast`, `obstacle_slow`, `obstacle_fast`, `line_gap_slow`, `line_gap_fast`, `impact_slow`, `hump_slow` | the same courses at 80 and 300 mm/s (`SET base_speed`): the outcome must not depend on the speed (no fixed times or speeds in the behaviour) |
+| `oval_tilt_cal`, `oval_tilt_run` | a wrong IMU "level": tilted 4.4° during the power-up calibration (re-learned in READY: no false slope), or tilted 5° during the run (the IMU says "climbing" all the time): the car must still follow every curve. With the old rule (ignore the line on a hump) the car left the loop by 2.4 m |
+
+Scenarios that check *where* the car ends up run until it has driven a
+given distance (`sim_run_dist`), not for a fixed time, so a slower speed
+setting tests the same behaviour. The simulated motors free-wheel when
+Motion Control coasts, so the learned stopping rate is exercised.
 
 The simulator checks the **logic** and how the parts work together. It does
 not replace the measurements on the real car: the values marked MEASURE in

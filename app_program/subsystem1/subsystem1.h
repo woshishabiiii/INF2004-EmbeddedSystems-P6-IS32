@@ -38,15 +38,21 @@ IMPORT W	param_get(UINT index);
 /* ---- private to subsystem 1 ---- */
 #define TOPIC_STATUS		0U
 #define TOPIC_TELEMETRY		1U
-#define TOPIC_EVENT		2U
-#define NET_PAYLOAD_MAX		200U	/* bytes per MQTT message (lwIP buffer is 256) */
-#define NET_CMD_MAX		64U
+#define TOPIC_EVENT		2U	/* the last topic number */
+
+#define NET_PAYLOAD_MAX		34U	/* bytes per MQTT message: TEL_BIN_MAX (tel_bin.h) */
+#define NET_CMD_MAX		4U	/* bytes per command: CMD_BYTES (cmd_parse.h) */
 
 IMPORT ID		mqtt_tx_mbf, mqtt_rx_mbf, tid_telemetry;
-IMPORT volatile UW	net_rx_drops;	/* commands lost (buffer full or too long) */
-IMPORT volatile UW	net_errors;	/* commands too long, or publishes refused by lwIP */
-IMPORT volatile UW	net_connects;	/* MQTT connections made */
-IMPORT volatile BOOL	net_up;		/* MQTT connected now */
+/* Written only by the network task (net_bridge.c), read by Telemetry.
+   The counters stop at 255 (8 bits, as in the status record).  Whether
+   the link is up is NOT a separate variable: it is the FLT_WIFI_DOWN bit
+   in fault_flags (set while down, never latched). */
+IMPORT volatile UB	net_rx_drops;	/* commands lost (buffer full or too long) */
+IMPORT volatile UB	net_errors;	/* commands too long, or publishes refused by lwIP */
+IMPORT volatile UB	net_connects;	/* MQTT connections made */
+IMPORT volatile UW	net_reconnect_ms;	/* last loss -> connected again, ms (0 = none); 18 bits
+					   on the wire (262 s), so a 32-bit word: one store */
 IMPORT const char	*net_topic_name(UINT topic);
 IMPORT void		telemetry_task(INT stacd, void *exinf);
 

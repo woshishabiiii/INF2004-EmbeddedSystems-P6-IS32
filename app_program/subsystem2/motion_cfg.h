@@ -30,8 +30,19 @@
 /* ---- motion profile ----------------------------------------------------- */
 #define MC_MAX_SPEED		400	/* mm/s, hard limit for every command */
 #define MC_MIN_SPEED		60	/* mm/s, slowest speed while a move is running */
-#define MC_ACCEL		600	/* mm/s^2 (ramps; stops the wheels slipping)  TUNE */
-#define MC_TURN_SPEED		150	/* mm/s wheel speed while spinning           TUNE */
+#define MC_ACCEL		250	/* mm/s^2 (ramps; stops the wheels slipping)  TUNE */
+#define MC_DUTY_RISE		40	/* permille per 20 ms: largest INCREASE of a wheel's drive,
+					   so starts and speed-ups are smooth; decreases are never
+					   limited (0 = no limit)  TUNE */
+#define MC_STOP_COAST		1	/* 1: on CMD_STOP (STOP, obstacle) the motors coast until both
+					   wheels are below MC_SETTLE_SPEED, then brake; 0: brake at
+					   once.  FAULT_STOP always brakes at once.  TUNE */
+#define MC_STEER_PM_MM		80	/* smooth steering: a wheel's speed changes by at most
+					   8 % of the travel speed per mm travelled, so a
+					   steering correction is a short ramp (a few mm of
+					   travel), the same PATH at any speed.  Lower =
+					   smoother, higher = sharper (0 = no limit)  TUNE */
+#define MC_TURN_SPEED		100	/* mm/s wheel speed while spinning           TUNE */
 #define MC_K_STRAIGHT		4	/* mm/s of trim per mm of left/right difference  TUNE */
 #define MC_SETTLE_SPEED		20	/* mm/s: slower than this counts as stopped */
 

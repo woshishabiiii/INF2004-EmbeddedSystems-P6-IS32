@@ -8,6 +8,8 @@
 #ifndef IMU_CFG_H
 #define IMU_CFG_H
 
+#include "../subsystem2/motion_cfg.h"	/* the car's own speeds and ramp rate */
+
 #define IMU_PERIOD_MS		10	/* 100 Hz, same as the accelerometer's data rate */
 
 /* 1 = the car may not run without the IMU (an I2C failure is a fault).
@@ -38,12 +40,16 @@
 #define IMU_IMPACT_MG		1500	/* horizontal jolt that may be a collision TUNE */
 #define IMU_IMPACT_WINDOW_MS	150U	/* ... if the speed drops within this */
 #define IMU_IMPACT_DROP_PCT	50	/* ... to half the speed before, or less */
-#define IMU_IMPACT_MIN_SPEED	80	/* mm/s: slower = cannot be our collision */
+/* A collision needs the car to be DRIVING: any speed Motion Control drives
+   at counts (half its slowest running speed), so a slow car is protected
+   too.  The jolt and the speed collapse, both measured, decide. */
+#define IMU_IMPACT_MIN_SPEED	(MC_MIN_SPEED / 2)	/* mm/s */
 #define IMU_IMPACT_STOPS	1	/* 1 = a collision is a fault (Safe Stop) */
 
 #define IMU_STILL_SPEED		10	/* mm/s */
 #define IMU_STILL_DEV_MG	40	/* vibration below this = still */
-#define IMU_ACCEL_MM_S2		250	/* |dv/dt| above this = accelerating */
+#define IMU_ACCEL_MM_S2		(MC_ACCEL / 2)	/* |dv/dt| above half the car's own ramp
+						   rate = accelerating */
 #define IMU_TURN_CDEG_S		3000	/* |yaw rate| above 30 deg/s = turning */
 #define IMU_CLASS_HOLD		5U	/* samples (50 ms) before a new class is reported */
 #define IMU_FAIL_LIMIT		5U	/* failed reads in a row = IMU fault */

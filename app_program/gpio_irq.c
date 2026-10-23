@@ -37,7 +37,7 @@
 LOCAL GPIO_EDGE_FN	s_fn[GPIO_NUM];
 LOCAL BOOL		s_started = FALSE;
 EXPORT volatile UW	gpio_irq_calls;
-EXPORT volatile UW	gpio_irq_max_us;
+EXPORT volatile UH	gpio_irq_max_us;
 
 LOCAL void gpio_bank_handler(UINT intno)
 {
@@ -71,7 +71,7 @@ LOCAL void gpio_bank_handler(UINT intno)
 	gpio_irq_calls++;
 	dt = in_w(TIMER_TIMERAWL) - t0;
 	if (dt > gpio_irq_max_us) {
-		gpio_irq_max_us = dt;
+		gpio_irq_max_us = (dt > 0xFFFFU) ? (UH)0xFFFFU : (UH)dt;
 	}
 }
 
@@ -131,4 +131,10 @@ EXPORT ER gpio_irq_start(void)
 	EnableInt(GPIO_IRQ_INTNO, GPIO_IRQ_LEVEL);
 	s_started = TRUE;
 	return E_OK;
+}
+
+EXPORT UW gpio_funcsel(UINT pin)
+{
+	/* GPIOn_CTRL is at IO_BANK0 + 8 n + 4; FUNCSEL is bits 4:0 */
+	return (pin < GPIO_NUM) ? (in_w(IO_BANK0_BASE + (8U * (UW)pin) + 4U) & 0x1FU) : 0x1FU;
 }

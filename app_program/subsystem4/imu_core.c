@@ -4,6 +4,8 @@
  *
  *	Every 10 ms:
  *	  1. calibrate (first cal_samples samples, car at rest and level);
+ *	     then, whenever the car stands still waiting for START, keep
+ *	     re-learning "level" from the floor it stands on;
  *	  2. impact check on the raw horizontal acceleration;
  *	  3. low-pass filter; remove the car's own acceleration;
  *	  4. pitch relative to the mounting, terrain state with hysteresis;
@@ -13,29 +15,14 @@
 
 #include "imu_core.h"
 #include "imu_math.h"
+#include "../bitpack.h"
 
 #define IMU_Q			16	/* filters keep 1/16 mg */
 #define MG_PER_MM_S2_X1000	102	/* 1 mm/s^2 = 0.102 mg */
 #define ACC_LPF_DIV		4	/* encoder acceleration filter */
 #define DS_MAX_MM		100	/* larger jumps of the odometer are glitches */
 #define IMPACT_HOLD_MS		500U	/* class stays IMPACT this long */
-
-static const char * const s_motion_names[MOTION_CLASSES] = {
-	"STATIONARY", "MOVING", "ACCELERATING", "DECELERATING",
-	"TURNING", "CLIMBING", "DESCENDING", "IMPACT"
-};
-
-static const char * const s_terrain_names[3] = {"LEVEL", "CLIMBING", "DESCENDING"};
-
-const char *imu_motion_name(int32_t motion)
-{
-	return ((motion >= 0) && (motion < MOTION_CLASSES)) ? s_motion_names[motion] : "?";
-}
-
-const char *imu_terrain_name(int32_t terrain)
-{
-	return ((terrain >= 0) && (terrain <= TERRAIN_DESCENDING)) ? s_terrain_names[terrain] : "?";
-}
+#define RELEVEL_DIV		16	/* re-levelling: 1/16 of the difference per sample */
 
 static int32_t iabs32(int32_t x)
 {
@@ -209,6 +196,32 @@ static void terrain_and_hump(IMU_CORE *c, int32_t dh_um, int32_t ds_mm, bool mov
 	}
 }
 
+/* Not on a run.  Slopes and humps are things the car DRIVES over: while
+   it is carried, put down or waiting, none are measured (and any hump in
+   progress is dropped, not reported).  While it stands still waiting for
+   START, "level" is re-learned from the floor it stands on, so a car
+   that was tilted during the power-up calibration (picked up, cable
+   pulling) is level again before it starts. */
+static void not_running(IMU_CORE *c, const IMU_MOTION *m, IMU_OUT *out)
+{
+	if (c->terrain != TERRAIN_LEVEL) {
+		c->terrain = TERRAIN_LEVEL;
+		(void)evt_list_add(&out->ev, (uint8_t)EV_TERRAIN, TERRAIN_LEVEL, c->pitch_cdeg);
+	}
+	c->in_hump = false;
+	c->h_um = 0;
+	c->peak_um = 0;
+	c->pmax_cdeg = 0;
+	c->tilt_mm = 0;
+	c->tilt_dir = 0;
+	clear_pre(c);
+	if (m->waiting && (c->motion == MOTION_STATIONARY)) {
+		int32_t level = imu_atan2_cdeg(c->f, c->u);	/* still: no acceleration to remove */
+
+		c->base_cdeg += (level - c->base_cdeg) / RELEVEL_DIV;
+	}
+}
+
 static void classify(IMU_CORE *c, int32_t rf, int32_t rl, const IMU_MOTION *m,
 		     uint32_t now_ms, IMU_OUT *out)
 {
@@ -297,9 +310,48 @@ void imu_core_step(IMU_CORE *c, const int32_t a_mg[3], bool valid,
 		c->prev_dist = m->dist_mm;
 		c->have_dist = true;
 	}
-	terrain_and_hump(c, dh_um, ds, m->valid && (iabs32(m->speed_mm_s) >= c->p.still_speed),
-			 now_ms, out);
+	if (m->running) {
+		terrain_and_hump(c, dh_um, ds, m->valid && (iabs32(m->speed_mm_s) >= c->p.still_speed),
+				 now_ms, out);
+	} else {
+		not_running(c, m, out);
+	}
 
 	/* 6. motion class */
 	classify(c, rf, rl, m, now_ms, out);
+}
+
+/* ---- packed status (imu_core.h) ----------------------------------------- */
+#define ICS_PITCH_MIN	(-8192)
+#define ICS_HEAD_MIN	(-32768)
+
+void ic_status_pack(const IC_STATUS *s, IC_STATUS_PK *pk)
+{
+	pk->w[0] = (s->calibrated ? 1U : 0U) |
+		   (s->ok ? 2U : 0U) |
+		   (bp_sat_u(s->terrain, 2U) << 2) |
+		   (bp_sat_u(s->motion, 3U) << 4) |
+		   (bp_sat_s(s->pitch_cdeg, ICS_PITCH_MIN, 14U) << 7) |
+		   (bp_sat_u(s->max_hump_mm, 8U) << 21);
+	pk->w[1] = bp_sat_u(s->last_hump_mm, 8U) |
+		   (bp_sat_u((int32_t)s->humps, 8U) << 8) |
+		   (bp_sat_u(s->g0_mg, 12U) << 16);
+	pk->w[2] = bp_sat_s(s->heading_cdeg, ICS_HEAD_MIN, 16U);
+}
+
+void ic_status_unpack(const IC_STATUS_PK *pk, IC_STATUS *s)
+{
+	uint32_t w0 = pk->w[0];
+	uint32_t w1 = pk->w[1];
+
+	s->calibrated = ((w0 & 1U) != 0U);
+	s->ok = ((w0 & 2U) != 0U);
+	s->terrain = (int32_t)((w0 >> 2) & BP_MAX(2U));
+	s->motion = (int32_t)((w0 >> 4) & BP_MAX(3U));
+	s->pitch_cdeg = bp_from_s((w0 >> 7) & BP_MAX(14U), ICS_PITCH_MIN);
+	s->max_hump_mm = (int32_t)((w0 >> 21) & BP_MAX(8U));
+	s->last_hump_mm = (int32_t)(w1 & BP_MAX(8U));
+	s->humps = (w1 >> 8) & BP_MAX(8U);
+	s->g0_mg = (int32_t)((w1 >> 16) & BP_MAX(12U));
+	s->heading_cdeg = bp_from_s(pk->w[2] & BP_MAX(16U), ICS_HEAD_MIN);
 }

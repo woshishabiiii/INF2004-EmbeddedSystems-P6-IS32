@@ -27,7 +27,9 @@
  * --------------------------------------------------------------------- */
 #define TASK_STACK_SIZE		4096	/* bytes; tm_printf needs ~1 KB, and the
 					   scan and telemetry tasks keep arrays and
-					   JSON buffers on their stacks (team: was 2048) */
+					   record buffers on their stacks (team: was
+					   2048; V12's JSON buffers are gone, but keep
+					   4096 until stack use is measured) */
 
 /* The program's entry point, called by the kernel (app_main.c) */
 IMPORT INT usermain(void);

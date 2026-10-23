@@ -4,6 +4,7 @@
  */
 
 #include "barcode_core.h"
+#include "../bitpack.h"
 
 #define BC_MIN_REPORTED	3U	/* fewer elements than this is not worth reporting */
 
@@ -25,6 +26,7 @@ void bc_edge(BC_CORE *b, uint32_t t_us, uint8_t level)
 {
 	uint32_t gap;
 
+	t_us &= BP_T31_MASK;			/* 31-bit edge time (drv_barcode.h) */
 	if (!b->capturing) {
 		if (level == b->p.bar_level) {		/* first edge into a bar */
 			b->t[0] = t_us;
@@ -44,7 +46,7 @@ void bc_edge(BC_CORE *b, uint32_t t_us, uint8_t level)
 	if (level == b->last_level) {
 		return;		/* two transitions that cancelled out: no change */
 	}
-	gap = t_us - b->t[b->n - 1U];
+	gap = bp_dt31(t_us, b->t[b->n - 1U]);	/* wrap-safe */
 	if (gap < b->p.t_min_us) {
 		/* Chatter: this edge and the one before it are a glitch pair.
 		   Removing both keeps the levels alternating. */
@@ -82,7 +84,7 @@ bool bc_poll(BC_CORE *b, uint32_t now_us, BC_RESULT *res)
 	if (t_end < b->p.t_end_min_us) {
 		t_end = b->p.t_end_min_us;
 	}
-	if ((now_us - b->t[b->n - 1U]) <= t_end) {
+	if (bp_dt31(now_us, b->t[b->n - 1U]) <= t_end) {
 		return false;			/* still inside the barcode */
 	}
 
@@ -102,7 +104,7 @@ bool bc_poll(BC_CORE *b, uint32_t now_us, BC_RESULT *res)
 	} else {
 		res->narrow_us = UINT32_MAX;
 		for (i = 0U; i < CODE39_ELEMENTS; i++) {
-			w[i] = b->t[i + 1U] - b->t[i];
+			w[i] = bp_dt31(b->t[i + 1U], b->t[i]);
 			if (w[i] < res->narrow_us) {
 				res->narrow_us = w[i];
 			}

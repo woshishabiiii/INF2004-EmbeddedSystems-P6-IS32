@@ -11,7 +11,8 @@
 
 #include "../../app_program/app_evt.h"
 #include "../../app_program/subsystem1/cmd_parse.h"
-#include "../../app_program/subsystem1/tel_json.h"
+#include "../../app_program/subsystem1/tel_bin.h"
+#include "../../app_program/bitpack.h"
 #include "../../app_program/subsystem2/mc_core.h"
 #include "../../app_program/subsystem2/motion_cfg.h"
 #include "../../app_program/subsystem3/code39.h"
@@ -122,30 +123,35 @@ static void test_code39(void)
 /* ===== barcode capture ======================================================= */
 static const BC_PARAMS k_bc = {LB_T_MIN_US, LB_T_END_MIN_MS * 1000U, LB_T_END_FACTOR, 1U};
 
-/* feed "*c*" with narrow width n us; glitch = add a 100 us chatter pair in element 4 */
+/* feed "*c*" with narrow width n us; glitch = add a 100 us chatter pair in element 4.
+   Times are 31-bit edge times as drv_barcode.c stores them, starting at g_bc_t0. */
+static uint32_t g_bc_t0 = 1000U;
+
+#define T31(x)	((uint32_t)(x) & 0x7FFFFFFFU)
+
 static bool feed(BC_CORE *b, char c, uint32_t n, bool glitch, bool merged, BC_RESULT *res)
 {
-	uint32_t	w[CODE39_ELEMENTS], t = 1000U, i;
+	uint32_t	w[CODE39_ELEMENTS], t = g_bc_t0, i;
 	uint8_t		lvl = 1U;
 
 	(void)code39_encode(c, n, 3U * n, w);
 	for (i = 0U; i < CODE39_ELEMENTS; i++) {
-		bc_edge(b, t, lvl);
+		bc_edge(b, T31(t), lvl);
 		if (glitch && (i == 4U)) {
-			bc_edge(b, t + (w[i] / 2U), (uint8_t)(lvl ^ 1U));
-			bc_edge(b, t + (w[i] / 2U) + 100U, lvl);
+			bc_edge(b, T31(t + (w[i] / 2U)), (uint8_t)(lvl ^ 1U));
+			bc_edge(b, T31(t + (w[i] / 2U) + 100U), lvl);
 		}
 		if (merged && (i == 6U)) {
-			bc_edge(b, t + (w[i] / 2U), lvl);	/* an edge that changes nothing */
+			bc_edge(b, T31(t + (w[i] / 2U)), lvl);	/* an edge that changes nothing */
 		}
 		t += w[i];
 		lvl ^= 1U;
 	}
-	bc_edge(b, t, 0U);
-	if (bc_poll(b, t + 1000U, res)) {
+	bc_edge(b, T31(t), 0U);
+	if (bc_poll(b, T31(t + 1000U), res)) {
 		return false;			/* must not end before the quiet time */
 	}
-	return bc_poll(b, t + 1000000U, res);
+	return bc_poll(b, T31(t + 1000000U), res);
 }
 
 static void test_barcode(void)
@@ -175,6 +181,28 @@ static void test_barcode(void)
 	}
 	check("BC-05", bc_poll(&b, t + 1000000U, &r) && (r.result == C39_BAD_COUNT),
 	      "60 edges: not a barcode");
+	/* wraparound: the capture starts 0.2 s before the 31-bit time wraps */
+	g_bc_t0 = 0x80000000U - 200000U;
+	bc_init(&b, &k_bc);
+	check("BC-07", feed(&b, 'B', 15000U, false, false, &r) && (r.result == C39_OK) && (r.c == 'B') &&
+	      (r.narrow_us == 15000U), "a barcode across the 31-bit time wrap decodes, widths unchanged");
+	bc_init(&b, &k_bc);
+	bc_edge(&b, 0x7FFFF000U | 0x80000000U, 1U);	/* the level bit left in: masked */
+	bc_edge(&b, 0x00001000U, 0U);
+	check("BC-08", (b.n == 2U) && (b.widest_us == 0x2000U),
+	      "bp_dt31: edge times are masked before and after subtracting");
+	g_bc_t0 = 1000U;
+	{
+		LC_STATUS st = {true, false, '_', 3U, 300U, 7U}, u;
+
+		lc_status_unpack(lc_status_pack(&st), &u);
+		check("BC-09", u.left_black && !u.right_black && (u.last_char == '_') && (u.reads_ok == 3U) &&
+		      (u.reads_failed == 255U) && (u.junctions == 7U),
+		      "line status word round-trips; counts stop at 255");
+		st.last_char = '-';
+		lc_status_unpack(lc_status_pack(&st), &u);
+		check("BC-10", u.last_char == '-', "'-' (no barcode yet) fits the 6-bit character");
+	}
 	check("BC-06", (bc_command_for('A') == LB_CMD_TURN_LEFT) && (bc_command_for('B') == LB_CMD_TURN_RIGHT) &&
 	      (bc_command_for('C') == LB_CMD_STRAIGHT) && (bc_command_for('D') == LB_CMD_U_TURN) &&
 	      (bc_command_for('Z') == LB_CMD_NONE), "command table");
@@ -184,15 +212,16 @@ static void test_barcode(void)
 static void test_line(void)
 {
 	LC_CORE		c;
-	LC_PARAMS	p = {LB_JUNCTION_MS, LB_JUNCTION_MM, LB_T_LOST_MS};
+	LC_PARAMS	p = {LB_JUNCTION_MS, LB_JUNCTION_MM, LB_LOST_MM};
 	EVT_LIST	ev;
 	LS_STATE	s;
-	LS_PARAMS	lp = {LS_D_MIN, LS_D_RATE, LS_D_MAX, LS_D_BIAS, LS_D_SEARCH, LS_T_ESCAPE_MS, LS_T_DRIFT_MS,
-			      LB_T_LOST_MS, LS_SLOW_PCT, LS_START_SIDE};
+	LS_PARAMS	lp = {LS_D_MIN, LS_D_RATE, LS_RATE_MM, LS_D_MAX, LS_D_BIAS, LS_D_SEARCH, LS_ESCAPE_MM,
+			      LS_DRIFT_MM, LB_LOST_MM, LS_SLOW_PCT, LS_START_SIDE};
 	LS_OUT		o, o2;
+	int32_t		bias200 = (200 * LS_D_BIAS) / 1000;	/* the lean at 200 mm/s, mm/s */
 	int		ok;
 
-	lc_init(&c, &p, 0U);
+	lc_init(&c, &p, 0);
 	evt_list_clear(&ev);
 	lc_step(&c, false, false, 5U, 0, &ev);
 	lc_step(&c, false, false, 10U, 1, &ev);
@@ -215,42 +244,56 @@ static void test_line(void)
 	evt_list_clear(&ev);
 	lc_step(&c, false, true, 60U, 14, &ev);
 	lc_step(&c, false, false, 70U, 16, &ev);
-	lc_step(&c, false, false, 70U + LB_T_LOST_MS + 1U, 20, &ev);
-	lc_step(&c, false, false, 80U + LB_T_LOST_MS + 1U, 20, &ev);
+	lc_step(&c, false, false, 90000U, 16, &ev);	/* a long wait, standing still */
+	check("LC-05", !has_event(&ev, EV_LINE_LOST), "standing still off the line: not lost (T_lost is travel)");
+	lc_step(&c, false, false, 90010U, 14 + LB_LOST_MM + 1, &ev);
+	lc_step(&c, false, false, 90020U, 14 + LB_LOST_MM + 2, &ev);
 	check("LC-04", has_event(&ev, EV_LINE_LOST) && (ev.ev[ev.n - 1U].p1 == 1),
-	      "line lost after T_lost, on the side last seen (right)");
+	      "line lost after T_lost of travel, on the side last seen (right)");
 
-	ls_init(&s, &lp, 0U);
-	ls_update(&s, true, false, 100U);
-	ls_output(&s, 100U, 200, &o);
-	ls_output(&s, 400U, 200, &o2);
+	ls_init(&s, &lp, 0);
+	ls_update(&s, true, false, 100);
+	ls_output(&s, 100, 200, &o);
+	ls_output(&s, 160, 200, &o2);
 	check("LS-01", (o.v_left < o.v_right) && ((o2.v_right - o2.v_left) > (o.v_right - o.v_left)),
-	      "left on black: steer left, harder the longer it stays");
-	ls_update(&s, false, true, 500U);
-	ls_output(&s, 500U, 200, &o);
+	      "left on black: steer left, harder the further it stays");
+	ls_update(&s, false, true, 200);
+	ls_output(&s, 200, 200, &o);
 	check("LS-02", o.v_left > o.v_right, "right on black: steer right");
-	ls_update(&s, true, true, 600U);
-	ls_output(&s, 600U, 200, &o);
+	ls_update(&s, true, true, 220);
+	ls_output(&s, 220, 200, &o);
 	check("LS-03", o.v_left == o.v_right, "both black: straight across");
-	ls_update(&s, false, true, 700U);
-	ls_update(&s, false, false, 710U);
-	ls_output(&s, 720U, 200, &o);
-	check("LS-04", (o.v_left > o.v_right) && ((o.v_left - o.v_right) == 2 * LS_D_BIAS),
+	ls_update(&s, false, true, 240);
+	ls_update(&s, false, false, 242);
+	ls_output(&s, 244, 200, &o);
+	check("LS-04", (o.v_left > o.v_right) && ((o.v_left - o.v_right) == 2 * bias200),
 	      "both white just after the right sensor: lean gently right");
-	ls_output(&s, 710U + LS_T_DRIFT_MS, 200, &o);
-	ls_output(&s, 710U + (2U * LS_T_DRIFT_MS), 200, &o2);
-	check("LS-05", ((o.v_left - o.v_right) == 2 * LS_D_BIAS) &&
-	      ((o2.v_left - o2.v_right) == 4 * LS_D_BIAS) && (o2.v_left == 200) && !o2.lost,
-	      "centred: the lean holds for T_drift, then grows (doubled after 2 x T_drift), full speed");
-	ls_output(&s, 710U + LB_T_LOST_MS + 10U, 200, &o);
-	check("LS-06", o.lost && (o.side == 1), "white past T_lost: lost, on the right");
-	ls_update(&s, false, true, 3000U);
-	ls_update(&s, false, false, 3000U + LS_T_ESCAPE_MS + 20U);
-	ls_output(&s, 3000U + LS_T_ESCAPE_MS + 30U, 200, &o);
-	check("LS-07", (o.v_left == (200 * LS_SLOW_PCT) / 100) && ((o.v_left - o.v_right) == 2 * LS_D_SEARCH),
-	      "right sensor black a long time, then white: line went outside, slow and turn firmly right");
-	ls_output(&s, 3000U + LS_T_ESCAPE_MS + 30U, 300, &o2);
+	ls_output(&s, 242 + LS_DRIFT_MM, 200, &o);
+	ls_output(&s, 242 + (2 * LS_DRIFT_MM), 200, &o2);
+	check("LS-05", ((o.v_left - o.v_right) == 2 * bias200) &&
+	      ((o2.v_left - o2.v_right) == 4 * bias200) && (o2.v_left == 200) && !o2.lost,
+	      "centred: the lean holds for drift_mm, then grows (doubled after 2 x drift_mm), full speed");
+	ls_output(&s, 242 + LB_LOST_MM + 10, 200, &o);
+	check("LS-06", o.lost && (o.side == 1), "white past T_lost of travel: lost, on the right");
+	ls_update(&s, false, true, 3000);
+	ls_update(&s, false, false, 3000 + LS_ESCAPE_MM + 5);
+	ls_output(&s, 3000 + LS_ESCAPE_MM + 6, 200, &o);
+	check("LS-07", (o.v_left == (200 * LS_SLOW_PCT) / 100) &&
+	      ((o.v_left - o.v_right) == 2 * ((200 * LS_D_SEARCH) / 1000)),
+	      "right sensor black a long way, then white: line went outside, slow and turn firmly right");
+	ls_output(&s, 3000 + LS_ESCAPE_MM + 6, 300, &o2);
 	check("LS-08", (o2.v_left <= 300) && (o2.v_right <= 300), "no wheel is asked for more than the base speed");
+
+	/* LS-09: the same situation at half the speed gives the same PATH:
+	   every correction is the same fraction of the speed, so the turn
+	   per millimetre (wheel difference / speed) does not change. */
+	ls_init(&s, &lp, 0);
+	ls_update(&s, true, false, 100);
+	ls_output(&s, 130, 200, &o);
+	ls_output(&s, 130, 100, &o2);
+	check("LS-09", ((o.v_right - o.v_left) == 2 * (o2.v_right - o2.v_left)) &&
+	      (o.v_right == 200) && (o2.v_right == 100) && (o2.v_left >= 0),
+	      "slower car: correction scales with the speed (same curvature), inside wheel never reverses");
 }
 
 /* ===== motion control ============================================================ */
@@ -258,7 +301,7 @@ static const MC_PARAMS k_mc = {
 	MC_COUNTS_PER_M, MC_COUNTS_PER_90DEG, MC_TRACK_MM, MC_KFF_X1000, MC_DEADBAND,
 	MC_KP_X1000, MC_KI_X1000, MC_MAX_SPEED, MC_MIN_SPEED, MC_ACCEL, MC_TURN_SPEED,
 	MC_K_STRAIGHT, MC_SETTLE_SPEED, MC_STALL_DUTY, MC_STALL_SPEED, MC_STALL_TICKS,
-	MC_TIMEOUT_MARGIN_MS, MC_SPEED_WINDOW
+	MC_TIMEOUT_MARGIN_MS, MC_SPEED_WINDOW, MC_DUTY_RISE, MC_STOP_COAST, MC_STEER_PM_MM
 };
 
 typedef struct {
@@ -268,6 +311,8 @@ typedef struct {
 	uint32_t t;
 	bool	stall;		/* the wheels cannot turn */
 	int	sign[2];	/* -1 = encoder wired backwards */
+	double	coast_keep;	/* > 0: while Motion Control coasts, speed kept per period
+				   (1.0 = rolling downhill, coasting does not slow it) */
 } RIG;
 
 /* one 20 ms period: a simple wheel model, then the controller */
@@ -283,9 +328,13 @@ static void rig_tick(RIG *r, MC_OUT *out, const MC_CMD *cmd, bool cmd_stop, bool
 		if (r->stall) {
 			vss = 0.0;
 		}
-		r->v[i] += (vss - r->v[i]) * 0.02 / 0.06;
-		if (d == 0.0) {
-			r->v[i] *= 0.4;
+		if ((d == 0.0) && r->c.coasting && (r->coast_keep > 0.0)) {
+			r->v[i] *= r->coast_keep;	/* free-wheeling */
+		} else {
+			r->v[i] += (vss - r->v[i]) * 0.02 / 0.06;
+			if (d == 0.0) {
+				r->v[i] *= 0.4;
+			}
 		}
 		r->cnt[i] += r->v[i] * 0.02 * 2.0 * r->sign[i];
 	}
@@ -320,7 +369,8 @@ static void test_motion(void)
 	MC_CMD	cmd;
 	MC_IN	in;
 	int	i, done = 0, ack = 0, fault = 0;
-	int32_t	first_target;
+	int32_t	first_target, integ, stop_mm;
+	uint32_t k;
 
 	/* distance move */
 	rig_init(&r);
@@ -401,7 +451,7 @@ static void test_motion(void)
 		rig_tick(&r, &out, NULL, false, false);
 		fault = out.fault;
 	}
-	check("MC-10", fault && (r.c.snap.fault_code == MC_FLT_STALL) && (out.duty[0] == 0),
+	check("MC-10", fault && (r.c.snap.fault_bits == MC_FLT_STALL) && (out.duty[0] == 0),
 	      "blocked wheels: stall fault, motors off");
 	rig_tick(&r, &out, NULL, false, false);
 	check("MC-11", r.c.mode == MC_FAULT, "own fault holds until FAULT_STOP has been seen and cleared");
@@ -415,7 +465,7 @@ static void test_motion(void)
 		rig_tick(&r, &out, NULL, false, false);
 		fault = out.fault;
 	}
-	check("MC-12", fault && (r.c.snap.fault_code == MC_FLT_ENCODER), "encoder backwards: detected, not a runaway");
+	check("MC-12", fault && (r.c.snap.fault_bits == MC_FLT_ENCODER), "encoder backwards: detected, not a runaway");
 
 	memset(&cmd, 0, sizeof(cmd));
 	cmd.type = MC_CMD_DISTANCE;
@@ -427,6 +477,185 @@ static void test_motion(void)
 	check("MC-15", (r.c.p.kp_x1000 == 1500) && (r.c.p.ki_x1000 == MC_KI_X1000) &&
 	      (r.c.p.counts_per_m == (MC_COUNTS_PER_M * 11) / 10) && (r.c.p.counts_per_90deg == MC_COUNTS_PER_90DEG),
 	      "tune: valid values used, unset (-1) and out-of-range ignored");
+
+	/* a speed hold between ticks is applied at once (feedback IS32:
+	   steering latency); the integrators only move on the tick */
+	rig_init(&r);
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.type = MC_CMD_SPEED;
+	cmd.a = 200;
+	cmd.b = 200;
+	rig_tick(&r, &out, &cmd, false, false);
+	for (i = 0; i < 50; i++) {
+		rig_tick(&r, &out, NULL, false, false);
+	}
+	integ = r.c.w[0].integ;
+	memset(&in, 0, sizeof(in));
+	in.now_ms = r.t + 7U;
+	in.now_us = in.now_ms * 1000U;
+	in.count[0] = (int32_t)floor(r.cnt[0]);
+	in.count[1] = (int32_t)floor(r.cnt[1]);
+	cmd.a = 150;
+	cmd.b = 250;
+	cmd.c = (int32_t)(r.t + 4U);		/* the line reading was 3 ms earlier */
+	in.ncmd = 1U;
+	in.cmd = &cmd;
+	mc_core_step(&r.c, &in, &out);		/* woken by the hold, no tick */
+	{
+		bool at_once = (r.c.w[0].target < 200) &&
+			       (r.c.w[1].target >= 200) && (out.duty[0] < out.duty[1]) &&
+			       (r.c.w[0].integ == integ) && (r.c.snap.steer_lat_ms == 3) &&
+			       (r.c.snap.steer_lat_max_ms == 3);
+
+		for (i = 0; i < 20; i++) {
+			rig_tick(&r, &out, NULL, false, false);
+		}
+		check("MC-16", at_once && (r.c.w[0].target == 150) && (r.c.w[1].target == 250),
+		      "speed hold between ticks: starts at once (as a short ramp, MC_STEER_PM_MM), "
+		      "latency logged; the full command within 20 ticks");
+	}
+
+	/* stopping distance and stop latency are logged */
+	ack = 0;
+	stop_mm = -1;
+	for (i = 0; (i < 50) && !ack; i++) {
+		rig_tick(&r, &out, NULL, true, false);
+		for (k = 0U; k < out.ev.n; k++) {
+			if (out.ev.ev[k].type == EV_STOP_ACK) {
+				ack = 1;
+				stop_mm = out.ev.ev[k].p2;
+			}
+		}
+	}
+	check("MC-17", ack && (stop_mm > 0) && (stop_mm < 60) && (r.c.snap.stop_dist_mm == stop_mm) &&
+	      (r.c.snap.stop_lat_max_us > 0), "STOP_ACK carries the stopping distance; stop latency logged");
+
+	/* smooth start: the drive never grows by more than MC_DUTY_RISE per tick,
+	   and the speed still settles on the target */
+	rig_init(&r);
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.type = MC_CMD_SPEED;
+	cmd.a = 200;
+	cmd.b = 200;
+	{
+		int32_t	prev[2] = {0, 0};
+		int	jerk = 0;
+
+		rig_tick(&r, &out, &cmd, false, false);
+		for (i = 0; i < 100; i++) {
+			for (k = 0U; k < 2U; k++) {
+				if ((MC_DUTY_RISE > 0) && ((out.duty[k] - prev[k]) > MC_DUTY_RISE)) {
+					jerk = 1;
+				}
+				prev[k] = out.duty[k];
+			}
+			rig_tick(&r, &out, NULL, false, false);
+		}
+		check("MC-18", !jerk && (abs(r.c.w[0].speed - 200) < 25) && (abs(r.c.w[1].speed - 200) < 25),
+		      "smooth start: drive rises at most MC_DUTY_RISE per tick, speed still reaches 200 mm/s");
+	}
+
+	/* smooth stop: CMD_STOP cuts the drive at once and coasts until the
+	   wheels have stopped, then brakes; FAULT_STOP never coasts */
+	{
+		int coast_at_stop, coast_after;
+
+		rig_tick(&r, &out, NULL, true, false);
+		coast_at_stop = (out.coast == (MC_STOP_COAST != 0)) && (out.duty[0] == 0) && (out.duty[1] == 0) &&
+				(out.stop_latency_us != 0U);
+		for (i = 0; i < 50; i++) {
+			rig_tick(&r, &out, NULL, true, false);
+		}
+		coast_after = !out.coast && (out.duty[0] == 0) && (out.duty[1] == 0);
+		rig_init(&r);
+		rig_tick(&r, &out, &cmd, false, false);
+		for (i = 0; i < 60; i++) {
+			rig_tick(&r, &out, NULL, false, false);
+		}
+		rig_tick(&r, &out, NULL, false, true);
+		check("MC-19", coast_at_stop && coast_after && !out.coast && (out.duty[0] == 0) && (out.duty[1] == 0),
+		      "CMD_STOP: duty 0 at once, coast until stopped, then brake; FAULT_STOP brakes at once");
+	}
+	/* MC-20: line following re-sends the speed hold every 200 ms; a car
+	   pushing against something must still raise the stall fault */
+	{
+		bool	fault = false;
+		int	n;
+
+		rig_init(&r);
+		cmd.type = MC_CMD_SPEED;
+		cmd.a = 120;
+		cmd.b = 120;
+		rig_tick(&r, &out, &cmd, false, false);
+		for (n = 0; n < 50; n++) {
+			rig_tick(&r, &out, NULL, false, false);
+		}
+		r.stall = true;
+		for (n = 0; (n < 200) && !fault; n++) {
+			rig_tick(&r, &out, ((n % 10) == 0) ? &cmd : NULL, false, false);	/* refresh */
+			fault = out.fault;
+		}
+		check("MC-20", fault && (r.c.snap.fault_bits == MC_FLT_STALL) && (out.duty[0] == 0),
+		      "blocked while holding speed, hold refreshed every 200 ms: stall fault still raised");
+	}
+
+	/* MC-21: the car learns how hard it really stops, from its own stops */
+	{
+		bool	ack = false;
+		int32_t	v0, d0, first;
+		int	n;
+
+		rig_init(&r);
+		check("MC-21a", r.c.snap.stop_decel_mm_s2 == 0, "no stopping rate before the first stop");
+		cmd.type = MC_CMD_SPEED;
+		cmd.a = 200;
+		cmd.b = 200;
+		rig_tick(&r, &out, &cmd, false, false);
+		for (n = 0; n < 60; n++) {
+			rig_tick(&r, &out, NULL, false, false);
+		}
+		for (n = 0; (n < 50) && !ack; n++) {
+			rig_tick(&r, &out, NULL, true, false);
+			ack = has_event(&out.ev, EV_STOP_ACK);
+		}
+		v0 = r.c.stop_speed;
+		d0 = (r.c.snap.stop_dist_mm > 0) ? r.c.snap.stop_dist_mm : 1;
+		first = r.c.snap.stop_decel_mm_s2;
+		check("MC-21", ack && (v0 > 150) && (first == ((v0 * v0) / (2 * d0))),
+		      "after a stop from speed: stopping rate = speed^2 / (2 x stopping distance)");
+		/* a stop that starts from (almost) standing still teaches nothing */
+		rig_tick(&r, &out, NULL, false, false);		/* START: stop bits clear */
+		ack = false;
+		for (n = 0; (n < 20) && !ack; n++) {
+			rig_tick(&r, &out, NULL, true, false);
+			ack = has_event(&out.ev, EV_STOP_ACK);
+		}
+		check("MC-21b", ack && (r.c.snap.stop_decel_mm_s2 == first),
+		      "a stop from standing still leaves the learned rate unchanged");
+	}
+
+	/* MC-22: coasting that does not slow the car (downhill) turns into braking */
+	{
+		bool	ack = false;
+		int	n, coast_ticks = 0;
+
+		rig_init(&r);
+		r.coast_keep = 1.0;
+		cmd.type = MC_CMD_SPEED;
+		cmd.a = 200;
+		cmd.b = 200;
+		rig_tick(&r, &out, &cmd, false, false);
+		for (n = 0; n < 60; n++) {
+			rig_tick(&r, &out, NULL, false, false);
+		}
+		for (n = 0; (n < 50) && !ack; n++) {
+			rig_tick(&r, &out, NULL, true, false);
+			coast_ticks += r.c.coasting ? 1 : 0;
+			ack = has_event(&out.ev, EV_STOP_ACK);
+		}
+		check("MC-22", ack && (coast_ticks <= (int)MC_ACCEL_WINDOW + 2) && (out.duty[0] == 0),
+		      "coasting that does not slow the car switches to the brake; the stop still completes");
+	}
 }
 
 /* ===== IMU maths and terrain ========================================================= */
@@ -496,6 +725,7 @@ static void test_imu(void)
 	imu_core_init(&c, &k_imu);
 	memset(&m, 0, sizeof(m));
 	m.valid = true;
+	m.running = true;		/* terrain and humps are measured on a run */
 	all.n = 0U;
 	for (i = 0; i < 100; i++) {
 		imu_feed(&c, 0.0, 0.0, &m, &t, &out, &all);
@@ -579,7 +809,92 @@ static void test_imu(void)
 	check("IMU-14", out.fault, "five failed reads in a row: IMU fault");
 }
 
+/* ===== IMU status words ====================================================== */
+static void test_pack_imu(void)
+{
+	IC_STATUS	a = {true, false, -8192, TERRAIN_DESCENDING, MOTION_IMPACT, 255, 255, 255U, -18000, 4095};
+	IC_STATUS	b;
+	IC_STATUS_PK	pk;
+
+	ic_status_pack(&a, &pk);
+	ic_status_unpack(&pk, &b);
+	check("PK-I01", (b.calibrated && !b.ok && (b.pitch_cdeg == -8192) &&
+	      (b.terrain == TERRAIN_DESCENDING) && (b.motion == MOTION_IMPACT) && (b.last_hump_mm == 255) &&
+	      (b.max_hump_mm == 255) && (b.humps == 255U) && (b.heading_cdeg == -18000) && (b.g0_mg == 4095)),
+	      "IMU status (3 words) round-trips at the field limits");
+	a.pitch_cdeg = 9000;
+	a.max_hump_mm = 400;
+	a.humps = 1000U;
+	ic_status_pack(&a, &pk);
+	ic_status_unpack(&pk, &b);
+	check("PK-I02", (b.pitch_cdeg == 8191) && (b.max_hump_mm == 255) && (b.humps == 255U),
+	      "pitch past +-81.9 deg and humps past 255 saturate, never wrap");
+}
+
 /* ===== safety monitor ========================================================= */
+/* IMU-15..17: "level" comes from the floor the car stands on before a run,
+   and slopes / humps are only measured while the car drives itself. */
+static void test_imu_level(void)
+{
+	IMU_CORE	c;
+	IMU_OUT		out;
+	IMU_MOTION	m;
+	EVT_LIST	all;
+	uint32_t	t = 0U, k;
+	int32_t		before;
+	int		i, slopes = 0, humps = 0;
+
+	/* calibrated while held 4.4 degrees nose-up (car of 23 Oct) */
+	imu_core_init(&c, &k_imu);
+	memset(&m, 0, sizeof(m));
+	m.valid = true;
+	all.n = 0U;
+	for (i = 0; i < 100; i++) {
+		imu_feed(&c, 4.4, 0.0, &m, &t, &out, &all);
+	}
+	/* put down level, waiting in READY */
+	for (i = 0; i < 10; i++) {
+		imu_feed(&c, 0.0, 0.0, &m, &t, &out, &all);
+	}
+	before = c.pitch_cdeg;
+	m.waiting = true;
+	for (i = 0; i < 300; i++) {
+		imu_feed(&c, 0.0, 0.0, &m, &t, &out, &all);
+	}
+	check("IMU-15", (before < -300) && (abs(c.pitch_cdeg) <= 30),
+	      "calibrated tilted (reads -4.4 deg level): standing still in READY re-learns level (0 +/- 0.3)");
+
+	/* carried by hand (not on a run): tilted 20 degrees over 200 mm */
+	m.waiting = false;
+	m.running = false;
+	m.speed_mm_s = 150;
+	all.n = 0U;
+	for (i = 0; i < 150; i++) {
+		m.dist_mm = 1000 + i * 2;
+		imu_feed(&c, (i < 100) ? 20.0 : 0.0, 0.0, &m, &t, &out, &all);
+	}
+	for (k = 0U; k < all.n; k++) {
+		slopes += ((all.ev[k].type == EV_TERRAIN) && (all.ev[k].p1 != TERRAIN_LEVEL)) ? 1 : 0;
+		humps += (all.ev[k].type == EV_HUMP) ? 1 : 0;
+	}
+	check("IMU-16", (slopes == 0) && (humps == 0) && (c.terrain == TERRAIN_LEVEL),
+	      "not on a run (carried, put down): no slope, no hump reported");
+
+	/* on a run the reference is NOT re-learned: a real slope is reported */
+	m.running = true;
+	slopes = 0;
+	all.n = 0U;
+	for (i = 0; i < 100; i++) {
+		m.dist_mm = 2000 + i * 2;
+		imu_feed(&c, 6.0, 0.0, &m, &t, &out, &all);
+	}
+	for (k = 0U; k < all.n; k++) {
+		slopes += ((all.ev[k].type == EV_TERRAIN) && (all.ev[k].p1 == TERRAIN_CLIMBING)) ? 1 : 0;
+	}
+	check("IMU-17", (slopes == 1) && (c.terrain == TERRAIN_CLIMBING),
+	      "on a run, a real 6 degree slope is still reported (level is only re-learned in READY)");
+}
+
 static void test_safety(void)
 {
 	SM_CORE		s;
@@ -605,6 +920,28 @@ static void test_safety(void)
 	sm_on_poll(&s, 0U, 1U, age, alive, &o);
 	sm_on_poll(&s, 0U, 1U, age, alive, &o);
 	check("SM-05", o.set_restart && (o.ev.n == 0U), "START while faulted is a RESTART request");
+
+	/* 16-bit health stamps across the 65.536 s wrap */
+	{
+		uint16_t	st[HEALTH_SLOTS] = {0U, 0U, 0U, 0U, 0U};
+		uint32_t	now = 65000U;
+		bool		ok = true;
+
+		sm_init(&s, &p);
+		while (now < 66500U) {		/* motion stamps every 20 ms, polled 1 ms later */
+			st[HEALTH_MOTION] = (uint16_t)(now | 1U);
+			sm_health_ages(&s, now + 1U, st, age, alive);
+			ok = ok && alive[HEALTH_MOTION] && (age[HEALTH_MOTION] <= 1U) && !alive[HEALTH_LINE];
+			now += 20U;
+		}
+		check("SM-06", ok, "health ages stay small across the 16-bit wrap (stamps from 65,000 ms)");
+		st[HEALTH_MOTION] = (uint16_t)(now + 3U);	/* stamped just after 'now' was read */
+		sm_health_ages(&s, now, st, age, alive);
+		ok = (age[HEALTH_MOTION] == 0U);
+		sm_health_ages(&s, now + 65536U + 100U, st, age, alive);	/* silent for 65.6 s */
+		ok = ok && (age[HEALTH_MOTION] == 65536U + 100U);	/* aged from when it was first seen */
+		check("SM-07", ok, "a stamp newer than 'now' is fresh; a task silent > 65.5 s stays silent");
+	}
 }
 
 /* ===== obstacle profile and scan ================================================= */
@@ -650,10 +987,46 @@ static void test_profile(void)
 }
 
 static const SCAN_PARAMS k_sc = {
-	OS_STOP_MM, OS_SLOW_MM, OS_SLOW_HYST_MM, OS_CONFIRM, OS_GAP_MS, OS_SETTLE_BASE_MS,
+	OS_STOP_MM, OS_SLOW_EXTRA_MM, OS_SLOW_HYST_MM, OS_DECEL_GUESS, OS_CONFIRM, OS_GAP_MS, OS_SETTLE_BASE_MS,
 	OS_SETTLE_MS_PER_DEG, OS_RETRIES, OS_R_MAX_MM, OS_CORRIDOR_MM, OS_COARSE_STEP, OS_FINE_STEP,
 	OS_FINE_MARGIN, OS_MISSING_LIMIT, OS_PROFILE_MAX_MS
 };
+
+/* Largest range (mm) at which two readings in a row give an ALERT, for a
+   car at speed_mm_s with a learned stopping rate decel (0 = not yet). */
+static int32_t alert_point(int32_t speed_mm_s, int32_t decel)
+{
+	int32_t r;
+
+	for (r = 700; r > 0; r--) {
+		SCAN_CORE	s;
+		SCAN_IN		in;
+		SCAN_OUT	out;
+		int		i, pending = 0, alert = 0;
+
+		scan_core_init(&s, &k_sc);
+		memset(&in, 0, sizeof(in));
+		in.have_req = true;
+		in.req.mode = SCAN_WATCH | SCAN_STOP_FLAG;
+		in.req.id = 9;
+		in.speed_mm_s = speed_mm_s;
+		in.stop_decel_mm_s2 = decel;
+		for (i = 0; (i < 40) && !alert; i++) {
+			in.now_ms = (uint32_t)(i * 10);
+			in.echo = pending ? SCAN_ECHO_DONE : SCAN_ECHO_NONE;
+			in.range_mm = r;
+			pending = 0;
+			scan_core_step(&s, &in, &out);
+			in.have_req = false;
+			pending = out.trigger ? 1 : 0;
+			alert = has_event(&out.ev, EV_ALERT) ? 1 : 0;
+		}
+		if (alert) {
+			return r;
+		}
+	}
+	return 0;
+}
 
 static void test_scan(void)
 {
@@ -664,17 +1037,18 @@ static void test_scan(void)
 	int		gap_ok = 1;
 	uint32_t	last_trig = 0U;
 	int		pending = 0;
+	int		stop_with_alert = 0, stray_stop = 0;
 
 	memset(visited, 0, sizeof(visited));
 	scan_core_init(&s, &k_sc);
 	memset(&in, 0, sizeof(in));
 	in.have_req = true;
-	in.req.mode = SCAN_WATCH;
+	in.req.mode = SCAN_WATCH | SCAN_STOP_FLAG;
 	in.req.id = 5;
 	for (i = 0; i < 100; i++) {
 		in.now_ms = (uint32_t)(i * 10);
 		in.echo = pending ? SCAN_ECHO_DONE : SCAN_ECHO_NONE;
-		in.range_mm = 200;
+		in.range_mm = OS_STOP_MM - 50;	/* a close reading, whatever the tuned distance */
 		pending = 0;
 		scan_core_step(&s, &in, &out);
 		in.have_req = false;
@@ -688,10 +1062,30 @@ static void test_scan(void)
 		}
 		if (has_event(&out.ev, EV_ALERT)) {
 			alert++;
+			stop_with_alert += out.stop_motors ? 1 : 0;
+		} else if (out.stop_motors) {
+			stray_stop++;
 		}
 	}
 	check("SC-01", gap_ok && (triggers >= 10), "watch: pings at least 70 ms apart");
 	check("SC-02", alert == 1, "two close readings: one ALERT, not repeated");
+	check("SC-08", (stop_with_alert == 1) && (stray_stop == 0),
+	      "WATCH with the stop flag: the ALERT also stops the car, once");
+
+	/* SC-10..12: the ALERT point comes from the car's own motion, so it
+	   comes to REST about stop_mm away at any speed */
+	{
+		int32_t lead300 = ((300 * (int32_t)(OS_CONFIRM * OS_GAP_MS)) / 1000) + ((300 * 300) / (2 * OS_DECEL_GUESS));
+
+		check("SC-10", alert_point(0, 0) == (OS_STOP_MM - 1),
+		      "standing still: ALERT just inside stop_mm");
+		check("SC-11", (alert_point(300, 0) == (OS_STOP_MM + lead300 - 1)) &&
+		      (alert_point(300, 0) > alert_point(100, 0)) && (alert_point(100, 0) > alert_point(0, 0)),
+		      "faster: ALERT earlier by the confirming pings + the stopping distance at that speed");
+		check("SC-12", (alert_point(300, 4 * OS_DECEL_GUESS) < alert_point(300, 0)) &&
+		      (alert_point(300, 4 * OS_DECEL_GUESS) > alert_point(0, 0)),
+		      "a car that has measured a harder stop starts its stop later (learned, not guessed)");
+	}
 
 	/* profile against a box 250 mm ahead, 120 mm wide */
 	in.have_req = true;
@@ -740,6 +1134,28 @@ static void test_scan(void)
 		fault = out.fault;
 	}
 	check("SC-07", fault, "no response ten times in a row: sensor fault");
+
+	/* without the flag (driving past a known obstacle): ALERT only */
+	scan_core_init(&s, &k_sc);
+	memset(&in, 0, sizeof(in));
+	in.have_req = true;
+	in.req.mode = SCAN_WATCH;
+	in.req.id = 9;
+	alert = 0;
+	stray_stop = 0;
+	pending = 0;
+	for (i = 0; i < 40; i++) {
+		in.now_ms = (uint32_t)(i * 10);
+		in.echo = pending ? SCAN_ECHO_DONE : SCAN_ECHO_NONE;
+		in.range_mm = OS_STOP_MM - 50;	/* a close reading, whatever the tuned distance */
+		pending = 0;
+		scan_core_step(&s, &in, &out);
+		in.have_req = false;
+		pending = out.trigger ? 1 : 0;
+		alert += has_event(&out.ev, EV_ALERT) ? 1 : 0;
+		stray_stop += out.stop_motors ? 1 : 0;
+	}
+	check("SC-09", (alert == 1) && (stray_stop == 0), "WATCH without the stop flag: ALERT, no stop");
 }
 
 /* ===== vehicle controller ======================================================= */
@@ -749,17 +1165,17 @@ static const VC_PARAMS k_vc = {
 	VC_REAR_CLEAR_MM, VC_OBST_DEPTH_MM, VC_LINE_HALF_MM, VC_STOP_MM, VC_BYPASS_STOP_MM,
 	VC_BYPASS_DEG, VC_BACK_MM, VC_N_RETRY, VC_TIE_MM, VC_PREF_SIDE, VC_FIND_EXTRA_MM,
 	VC_ALIGN_EXTRA_MM, VC_D_EXEC_MM, VC_JUNCTION_MUTE_MM, VC_CROSS_MM, VC_ACQUIRE_MM, VC_T_STARTUP_MS,
-	VC_T_ACK_MS, VC_T_SCAN_MS, VC_T_SEARCH_MS, VC_T_EXEC_MS, VC_T_BYPASS_MS,
-	VC_HUMP_GRACE_MS, VC_HOLD_REFRESH_MS
+	VC_T_ACK_MS, VC_T_SCAN_MS, MC_TRACK_MM, MC_TURN_SPEED, MC_ACCEL, VC_STEP_MARGIN_MS,
+	VC_HUMP_GRACE_MM, VC_HOLD_REFRESH_MS, VC_SEARCH_STEP_DEG, VC_SEARCH_MAX_DEG
 };
-static const LS_PARAMS k_ls = {LS_D_MIN, LS_D_RATE, LS_D_MAX, LS_D_BIAS, LS_D_SEARCH, LS_T_ESCAPE_MS, LS_T_DRIFT_MS,
-			       LB_T_LOST_MS, LS_SLOW_PCT, LS_START_SIDE};
+static const LS_PARAMS k_ls = {LS_D_MIN, LS_D_RATE, LS_RATE_MM, LS_D_MAX, LS_D_BIAS, LS_D_SEARCH, LS_ESCAPE_MM,
+			       LS_DRIFT_MM, LB_LOST_MM, LS_SLOW_PCT, LS_START_SIDE};
 
 static int32_t g_odo;		/* odometer the controller is told about */
 
 static void ev(VC_CORE *v, uint8_t type, int32_t p1, int32_t p2, uint32_t t, VC_ACTIONS *a)
 {
-	APP_MSG m;
+	APP_EVT m;
 
 	memset(&m, 0, sizeof(m));
 	m.type = type;
@@ -792,7 +1208,7 @@ static void to_scanning(VC_CORE *v, VC_ACTIONS *a)
 
 static int bypass_side(VC_CORE *v, OS_PROFILE *p, VC_ACTIONS *a)
 {
-	APP_MSG m;
+	APP_EVT m;
 
 	memset(&m, 0, sizeof(m));
 	m.type = EV_PROFILE;
@@ -802,6 +1218,135 @@ static int bypass_side(VC_CORE *v, OS_PROFILE *p, VC_ACTIONS *a)
 	return (v->state == VC_BYPASS) ? v->side : 0;
 }
 
+/* Start a run and drive past T_lost without seeing the line: a line
+   search starts at t = 1000 ms with its first VC_SEARCH_STEP_DEG spin. */
+static bool start_a_search(VC_CORE *v, const VC_PARAMS *p, VC_ACTIONS *a)
+{
+	g_odo = 0;
+	vc_init(v, p, &k_ls, 0U);
+	vc_tick(v, 20U, 0, true, a);
+	ev(v, EV_COMMAND, CMD_START, 0, 30U, a);
+	vc_tick(v, 1000U, LB_LOST_MM + 10, true, a);
+	return (v->state == VC_SEARCH) && (find(a, VA_TURN) != NULL);
+}
+
+/* the watchdog a spin of deg gets: 2 x its own expected time + the margin */
+static uint32_t spin_limit(const VC_PARAMS *p, int32_t deg)
+{
+	int32_t arc = (deg * 3142 * p->track_mm) / (360 * 1000);
+
+	return (2U * (uint32_t)((arc * 1000) / p->turn_speed)) + p->step_margin_ms;
+}
+
+/* VC-28/29: a hump (or a pitch reading that only looks like one) never
+   blinds the line follower while a sensor still sees the floor */
+static void test_vc_hump(void)
+{
+	VC_CORE		v;
+	VC_ACTIONS	a;
+	const VC_ACTION	*x;
+	int32_t		hs = (k_vc.hump_speed < k_vc.base_speed) ? k_vc.hump_speed : k_vc.base_speed;
+	bool		ok;
+
+	g_odo = 0;
+	vc_init(&v, &k_vc, &k_ls, 0U);
+	vc_tick(&v, 20U, 0, true, &a);
+	ev(&v, EV_COMMAND, CMD_START, 0, 30U, &a);
+	g_odo = 100;
+	ev(&v, EV_TERRAIN, TERRAIN_CLIMBING, 80, 40U, &a);
+	ev(&v, EV_LINE_STATUS, 1, 0, 50U, &a);		/* left black, right WHITE */
+	x = find(&a, VA_HOLD);
+	ok = (x != NULL) && (x->a < x->b) && (x->b <= hs);
+	check("VC-28", ok, "on a hump, one sensor black and one white: still steers toward the line, at hump speed");
+	ev(&v, EV_LINE_STATUS, 1, 1, 60U, &a);		/* both black: lifted off the floor? */
+	x = find(&a, VA_HOLD);
+	check("VC-29", (x != NULL) && (x->a == hs) && (x->b == hs),
+	      "on a hump, both black (sensors may be lifted): straight on at hump speed");
+}
+
+/* VC-30: the line search sweeps ever wider either side of where the line
+   was lost (+180, then -180 degrees from there), so the
+   whole circle is covered before the car gives up */
+static void test_vc_search_sweep(void)
+{
+	VC_CORE			v;
+	VC_ACTIONS		a;
+	const VC_ACTION		*x;
+	static const int32_t	want[] = {180, -360};
+	int32_t			heading = 0;
+	int32_t			widest = 0;
+	uint32_t		n = 0U;
+	uint32_t		t = 1000U;
+	bool			ok = start_a_search(&v, &k_vc, &a);
+	bool			seq_ok = true;
+	int32_t			first_sign;
+
+	x = find(&a, VA_TURN);
+	first_sign = ((x != NULL) && (x->a < 0)) ? -1 : 1;	/* the side the line was last seen */
+	while (ok && (x != NULL) && (n < 10U)) {
+		seq_ok = seq_ok && (n < (sizeof(want) / sizeof(want[0]))) && (x->a == (first_sign * want[n]));
+		heading += x->a;
+		widest = (heading > widest) ? heading : ((-heading > widest) ? -heading : widest);
+		n++;
+		t += 100U;
+		ev(&v, EV_DONE, MC_MOVE_TURN, x->c, t, &a);
+		x = (v.state == VC_SEARCH) ? find(&a, VA_TURN) : NULL;
+	}
+	check("VC-30", ok && seq_ok && (n == 2U) && (widest == 180) && (v.state == VC_HALTED) &&
+	      (v.why == VC_WHY_SEARCH_FAILED),
+	      "line search sweeps 180 degrees each side (the whole circle), then HALTED");
+}
+
+/* VC-25..27: no fixed time for a search, a barcode command or a bypass:
+   every step's watchdog comes from the step itself */
+static void test_vc_watchdog(void)
+{
+	VC_CORE		v;
+	VC_ACTIONS	a;
+	VC_PARAMS	slow = k_vc;
+	const VC_ACTION	*x;
+	uint32_t	lim = spin_limit(&k_vc, VC_SEARCH_STEP_DEG);
+	uint32_t	lim_slow;
+	bool		ok;
+
+	ok = start_a_search(&v, &k_vc, &a);
+	vc_tick(&v, 1000U + lim - 20U, LB_LOST_MM + 10, true, &a);
+	ok = ok && (v.state == VC_SEARCH);
+	vc_tick(&v, 1000U + lim + 40U, LB_LOST_MM + 10, true, &a);
+	check("VC-25", ok && (v.state == VC_HALTED) && (v.why == VC_WHY_SEARCH_FAILED),
+	      "a spin with no DONE is stopped at 2 x its own expected time + margin, not a fixed time");
+
+	slow.turn_speed = k_vc.turn_speed / 3;		/* a car that spins three times slower */
+	lim_slow = spin_limit(&slow, VC_SEARCH_STEP_DEG);
+	ok = start_a_search(&v, &slow, &a);
+	vc_tick(&v, 1000U + lim + 40U, LB_LOST_MM + 10, true, &a);
+	check("VC-26", ok && (v.state == VC_SEARCH) && (lim_slow > lim),
+	      "a slower spin gets proportionally longer: it is not cut short");
+
+	/* a barcode command at a junction, after SET base_speed 80 */
+	g_odo = 0;
+	vc_init(&v, &k_vc, &k_ls, 0U);
+	vc_tune(&v, 80, -1);
+	vc_tick(&v, 20U, 0, true, &a);
+	ev(&v, EV_COMMAND, CMD_START, 0, 30U, &a);
+	g_odo = 200;
+	ev(&v, EV_LINE_STATUS, 1, 0, 40U, &a);		/* on the line */
+	ev(&v, EV_BARCODE, 'A', LB_CMD_TURN_LEFT, 50U, &a);
+	ev(&v, EV_JUNCTION, 200, 0, 60U, &a);
+	x = find(&a, VA_MOVE);
+	{
+		int32_t  mm = k_vc.line_to_axle_mm + k_vc.line_half_mm;
+		uint32_t lim_move = (2U * (uint32_t)((mm * 1000) / 80)) + k_vc.step_margin_ms;
+
+		ok = (v.state == VC_EXEC) && (x != NULL) && (x->b == 80);
+		vc_tick(&v, 60U + lim_move - 20U, 200, true, &a);
+		ok = ok && (v.state == VC_EXEC);
+		vc_tick(&v, 60U + lim_move + 40U, 200, true, &a);
+		check("VC-27", ok && (v.state == VC_HALTED) && (v.why == VC_WHY_EXEC_TIMEOUT),
+		      "SET base_speed 80 caps the junction move at 80 mm/s, and its watchdog follows that speed");
+	}
+}
+
 static void test_vc(void)
 {
 	VC_CORE			v;
@@ -809,6 +1354,8 @@ static void test_vc(void)
 	OS_PROFILE		p;
 	const VC_ACTION		*x;
 	int32_t			id;
+	bool			ok;
+	APP_EVT			m;
 
 	vc_init(&v, &k_vc, &k_ls, 0U);
 	ev(&v, EV_COMMAND, CMD_START, 0, 10U, &a);
@@ -883,109 +1430,600 @@ static void test_vc(void)
 	v.retries = VC_N_RETRY;
 	v.state = VC_SCANNING;
 	(void)bypass_side(&v, &p, &a);
-	check("VC-18", (v.state == VC_SAFE_STOP) && (find(&a, VA_FAULT) != NULL), "still no room after the retries: Safe Stop");
+	check("VC-18", (v.state == VC_HALTED) && (v.why == VC_WHY_NO_ROUTE) && (find(&a, VA_FAULT) == NULL) &&
+	      (find(&a, VA_STOP) != NULL), "still no room after the retries: HALTED (mission failure, no fault latched)");
 	p.valid = false;
 	to_scanning(&v, &a);
 	(void)bypass_side(&v, &p, &a);
 	check("VC-19", v.state == VC_REVERSE, "nothing seen clearly: back off and look again");
 	to_scanning(&v, &a);
 	vc_tick(&v, 60U + VC_T_SCAN_MS + 10U, 0, true, &a);
-	check("VC-20", (v.state == VC_SAFE_STOP) && (v.why == VC_WHY_SCAN_FAILED), "no profile in time: Safe Stop");
-	check("VC-21", strcmp(vc_state_name(VC_FIND_LINE), "FIND_LINE") == 0, "state names");
+	x = find(&a, VA_SCAN);
+	ok = (v.state == VC_SCANNING) && (x != NULL) && (x->a == (int32_t)SCAN_PROFILE);
+	vc_tick(&v, 60U + (2U * VC_T_SCAN_MS) + 30U, 0, true, &a);
+	check("VC-20", ok && (v.state == VC_HALTED) && (v.why == VC_WHY_SCAN_FAILED) && (find(&a, VA_FAULT) == NULL),
+	      "no profile in time: scan once more, then HALTED");
+	check("VC-21", (strcmp(vc_state_name(VC_FIND_LINE), "FIND_LINE") == 0) &&
+	      (strcmp(vc_state_name(VC_HALTED), "HALTED") == 0), "state names");
+
+	v.commands_done = 3U;
+	ev(&v, EV_COMMAND, CMD_START, 0, 60U + (2U * VC_T_SCAN_MS) + 50U, &a);
+	check("VC-22", (v.state == VC_FOLLOW) && (find(&a, VA_CLEAR_STOP) != NULL) && (v.commands_done == 3U),
+	      "START after HALTED carries on with the same run (no RESTART needed)");
+
+	/* Obstacle Scan stops the car itself, except while passing an
+	   obstacle the controller decided to pass (Continue) */
+	vc_init(&v, &k_vc, &k_ls, 0U);
+	vc_tick(&v, 20U, 0, true, &a);
+	ev(&v, EV_COMMAND, CMD_START, 0, 30U, &a);
+	x = find(&a, VA_SCAN);
+	ok = (x != NULL) && (x->a == (int32_t)(SCAN_WATCH | SCAN_STOP_FLAG));
+	p.valid = true;
+	p.x_left_mm = 150;
+	p.x_right_mm = 250;
+	p.left_clear_mm = OS_CLEAR_OPEN;
+	p.right_clear_mm = OS_CLEAR_OPEN;
+	to_scanning(&v, &a);
+	(void)bypass_side(&v, &p, &a);
+	x = find(&a, VA_SCAN);
+	ok = ok && (v.state == VC_FOLLOW) && (x != NULL) && (x->a == (int32_t)SCAN_WATCH);
+	/* the car drove on past the obstacle, seeing the line (T_lost is
+	   travel: 590 mm without the line would be a line loss) */
+	memset(&m, 0, sizeof(m));
+	m.type = EV_LINE_STATUS;
+	m.p2 = 1;
+	vc_event(&v, &m, 190U, v.alert_mute_odo, &a);
+	vc_tick(&v, 200U, v.alert_mute_odo + 1, true, &a);
+	x = find(&a, VA_SCAN);
+	check("VC-23", ok && (x != NULL) && (x->a == (int32_t)(SCAN_WATCH | SCAN_STOP_FLAG)),
+	      "WATCH asks Obstacle Scan to stop the car; not while passing a known obstacle, then again");
+
+	memset(&m, 0, sizeof(m));
+	m.type = EV_LINE_STATUS;
+	m.p1 = 1;
+	m.t_ms = 1234U;
+	vc_event(&v, &m, 1236U, v.alert_mute_odo + 2, &a);
+	x = find(&a, VA_HOLD);
+	check("VC-24", (x != NULL) && (x->c == 1234), "a steering hold carries the time of its line reading");
 }
 
 /* ===== commands and telemetry =================================================== */
+static const uint8_t *cmdb(uint32_t seq, int32_t verb, int32_t param, int32_t value)
+{
+	static uint8_t	b[CMD_BYTES];
+	CMD		c;
+
+	c.seq = seq;
+	c.verb = verb;
+	c.param = param;
+	c.value = value;
+	cmd_encode(&c, b);
+	return b;
+}
+
 static void test_cmd(void)
 {
 	CMD		c;
 	uint32_t	seq = 0U;
+	uint8_t		raw[CMD_BYTES];
+	uint32_t	i;
+	bool		ok;
 
-	check("CMD-01", (cmd_parse("1 start", 7U, &seq, true, &c) == CMD_OK) && (c.verb == CMD_START), "lower case verb");
-	check("CMD-02", (cmd_parse("2 STOP\r\n", 8U, &seq, true, &c) == CMD_OK) && (c.verb == CMD_STOP), "CR LF tolerated");
-	check("CMD-03", cmd_parse("2 STOP", 6U, &seq, true, &c) == CMD_ERR_REPEAT, "old sequence number refused");
-	check("CMD-04", cmd_parse("3 STOP now", 10U, &seq, true, &c) == CMD_ERR_FORMAT, "trailing word refused");
-	check("CMD-05", cmd_parse("x STOP", 6U, &seq, true, &c) == CMD_ERR_FORMAT, "no sequence number refused");
-	check("CMD-06", cmd_parse("4 SET turn_cal 1600", 19U, &seq, true, &c) == CMD_ERR_RANGE, "out of range");
-	check("CMD-07", cmd_parse("4 SET Base_speed 200", 20U, &seq, true, &c) == CMD_ERR_NAME, "names are exact");
-	check("CMD-08", (cmd_parse("4 SET dist_cal 980", 18U, &seq, true, &c) == CMD_OK) && (c.param == 4) && (c.value == 980),
-	      "SET dist_cal 980");
-	check("CMD-09", cmd_parse("5 SET kp_x1000 1200", 19U, &seq, false, &c) == CMD_ERR_STATE, "SET refused while running");
-	check("CMD-10", cmd_parse("6 SET kp_x1000 1200 99999999999999999999999999999999999999999999999999", 70U, &seq, true, &c) ==
-	      CMD_ERR_FORMAT, "longer than 64 bytes refused");
-	check("CMD-11", cmd_parse("6 SET ki_x1000 -5", 17U, &seq, true, &c) == CMD_ERR_RANGE, "negative refused by range");
-	check("CMD-12", cmd_parse("999999999999 START", 18U, &seq, true, &c) == CMD_ERR_FORMAT, "absurd number refused");
+	check("CMD-01", (cmd_parse(cmdb(1U, CMD_START, 0, 0), 4U, &seq, true, &c) == CMD_OK) && (c.verb == CMD_START),
+	      "4-byte START");
+	check("CMD-02", (cmd_parse(cmdb(2U, CMD_STOP, 0, 0), 4U, &seq, true, &c) == CMD_OK) && (c.verb == CMD_STOP),
+	      "4-byte STOP");
+	check("CMD-03", cmd_parse(cmdb(2U, CMD_STOP, 0, 0), 4U, &seq, true, &c) == CMD_ERR_REPEAT,
+	      "same sequence number refused");
+	check("CMD-04", (cmd_parse(cmdb(3U, CMD_STOP, 0, 0), 5U, &seq, true, &c) == CMD_ERR_FORMAT) &&
+	      (cmd_parse(cmdb(3U, CMD_STOP, 0, 0), 3U, &seq, true, &c) == CMD_ERR_FORMAT),
+	      "anything but 4 bytes refused");
+	memcpy(raw, cmdb(3U, CMD_STOP, 0, 0), 4U);
+	raw[1] |= 0x40U;				/* a spare bit */
+	check("CMD-05", cmd_parse(raw, 4U, &seq, true, &c) == CMD_ERR_FORMAT, "spare bits set: a layout we do not know");
+	check("CMD-06", cmd_parse(cmdb(4U, CMD_VERB_SET, 5, 1600), 4U, &seq, true, &c) == CMD_ERR_RANGE, "out of range");
+	memcpy(raw, cmdb(4U, CMD_VERB_SET, 0, 200), 4U);
+	raw[1] = (uint8_t)(raw[1] | (7U << 3));		/* parameter 7: not in the whitelist */
+	check("CMD-07", cmd_parse(raw, 4U, &seq, true, &c) == CMD_ERR_NAME, "unknown parameter refused");
+	check("CMD-08", (cmd_parse(cmdb(4U, CMD_VERB_SET, 4, 980), 4U, &seq, true, &c) == CMD_OK) && (c.param == 4) &&
+	      (c.value == 980), "SET dist_cal 980");
+	check("CMD-09", cmd_parse(cmdb(5U, CMD_VERB_SET, 2, 1200), 4U, &seq, false, &c) == CMD_ERR_STATE,
+	      "SET refused while running");
+	check("CMD-10", (cmd_parse(cmdb(5U, CMD_VERB_SET, 3, 50000), 4U, &seq, true, &c) == CMD_OK) && (c.value == 50000),
+	      "the largest value (ki_x1000 = 50,000) fits the 16-bit field");
+	memcpy(raw, cmdb(6U, 0, 0, 0), 4U);
+	check("CMD-11", cmd_parse(raw, 4U, &seq, true, &c) == CMD_ERR_VERB, "verb 0 refused");
+
+	/* 8-bit sequence across the wrap: 250 .. 255, 0, 1 .. 10 all new */
+	seq = 249U;
+	ok = true;
+	for (i = 250U; i < 250U + 17U; i++) {
+		ok = ok && (cmd_parse(cmdb(i & 0xFFU, CMD_STOP, 0, 0), 4U, &seq, true, &c) == CMD_OK);
+	}
+	check("CMD-12", ok && (seq == 10U), "sequence 250..255, 0..10: every one new across the wrap");
+	ok = (cmd_parse(cmdb(10U + 127U, CMD_STOP, 0, 0), 4U, &seq, true, &c) == CMD_OK);
+	ok = ok && (cmd_parse(cmdb(137U + 128U - 256U + 0U, CMD_STOP, 0, 0), 4U, &seq, true, &c) == CMD_ERR_REPEAT);
+	ok = ok && (cmd_parse(cmdb(136U, CMD_STOP, 0, 0), 4U, &seq, true, &c) == CMD_ERR_REPEAT);
+	check("CMD-13", ok, "127 ahead is new; 128 ahead and 1 behind are repeats");
 }
+
+/* One record's bytes as hex, for the decoder vectors */
+static void hex_line(FILE *f, const char *name, const uint8_t *b, int32_t n)
+{
+	int32_t i;
+
+	fprintf(f, "%s ", name);
+	for (i = 0; i < n; i++) {
+		fprintf(f, "%02x", b[i]);
+	}
+	fprintf(f, "\n");
+}
+
+static FILE *g_vec;		/* --vectors FILE: records for tools/test_mqtt_decode.py */
 
 static void test_tel(void)
 {
 	TEL_DATA	d;
-	char		buf[TEL_JSON_MAX];
-	char		small[20];
-	APP_MSG		m;
+	uint8_t		buf[TEL_BIN_MAX];
+	APP_EVT		m;
 	TEL_SUMMARY	s;
-	int32_t		n1, n2, n3, n4;
-	TJ		j;
+	TEL_TIMING	tm;
+	OS_PROFILE	p;
+	int32_t		n;
+	uint32_t	k;
+	BP_R		r;
+	bool		ok;
 
+	memset(&d, 0, sizeof(d));
+	d.t_ms = 0x12345678U;
+	d.state = VC_FIND_LINE;
+	d.v[0] = -469;
+	d.v[1] = 212;
+	d.enc[0] = 65500 + 100;
+	d.enc[1] = -3;
+	d.odo_mm = 123456;
+	d.line_l = true;
+	d.barcode = 'B';
+	d.pending = 2;
+	d.pitch_cdeg = -1234;
+	d.motion = MOTION_DECELERATING;
+	d.hmax_mm = 25;
+	d.range_mm = 4095;
+	d.yaw_cdeg_s = -41300;
+	d.faults = FLT_STALL | FLT_MOVE_TIMEOUT | FLT_NO_ECHO | FLT_WIFI_DOWN | FLT_RESTART_REQ;
+	n = tel_bin_telemetry(&d, buf, TEL_BIN_MAX);
+	r.rec = buf;
+	r.pos = 0U;
+	ok = (n == 23) && (bp_ru(&r, 4U) == TEL_BIN_VERSION) && (bp_ru(&r, 4U) == TEL_T_TELEMETRY) &&
+	     (bp_ru(&r, 24U) == 0x345678U) && (bp_ru(&r, 4U) == (uint32_t)VC_FIND_LINE) &&
+	     (bp_rs(&r, 10U, -512) == -469) && (bp_rs(&r, 10U, -512) == 212) &&
+	     (bp_ru(&r, 16U) == ((65500U + 100U) & 0xFFFFU)) && (bp_ru(&r, 16U) == 0xFFFDU) &&
+	     (bp_ru(&r, 24U) == 123456U) && (bp_ru(&r, 2U) == 1U) && (bp_rs(&r, 6U, 32) == 'B') &&
+	     (bp_ru(&r, 3U) == 2U) && (bp_rs(&r, 14U, -8192) == -1234) && (bp_ru(&r, 3U) == MOTION_DECELERATING) &&
+	     (bp_ru(&r, 8U) == 25U) && (bp_ru(&r, 12U) == 4095U) && (bp_rs(&r, 10U, -512) == -413) &&
+	     (bp_ru(&r, 12U) == (0x201U | 0x400U | 0x800U)) && (r.pos == 182U);
+	check("TEL-01", ok, "telemetry: 182 bits = 23 B, every field read back (faults: 10 latched + NO_ECHO + WIFI_DOWN)");
+	if (g_vec != NULL) {
+		hex_line(g_vec, "telemetry", buf, n);
+	}
 	memset(&d, 0xFF, sizeof(d));		/* every number as large as it gets */
 	d.line_l = true;
 	d.line_r = true;
 	d.imu_ok = true;
-	d.mqtt_up = true;
-	d.state = VC_FIND_LINE;
-	d.motion = MOTION_DECELERATING;
-	d.barcode = '%';
 	d.v[0] = INT32_MIN;
-	d.v[1] = INT32_MIN;
-	d.enc[0] = INT32_MIN;
-	d.enc[1] = INT32_MIN;
-	d.odo_mm = INT32_MIN;
 	d.pitch_cdeg = INT32_MIN;
-	d.hmax_mm = INT32_MIN;
-	d.range_mm = INT32_MIN;
-	d.yaw_cdeg_s = INT32_MIN;
-	d.pending = INT32_MIN;
-	n1 = tel_fmt_telemetry(&d, buf, TEL_JSON_MAX);
-	n2 = tel_fmt_status(&d, buf, TEL_JSON_MAX);
-	n3 = tel_fmt_profile(UINT32_MAX, true, INT32_MIN, INT32_MIN, INT32_MIN, INT32_MIN, INT32_MIN, INT32_MIN,
-			     UINT32_MAX, UINT32_MAX, buf, TEL_JSON_MAX);
-	memset(&s, 0xFF, sizeof(s));
-	s.dist_mm = INT32_MIN;
-	s.hmax_mm = INT32_MIN;
-	n4 = tel_fmt_summary(&s, buf, TEL_JSON_MAX);
-	printf("        largest possible: telemetry %d, status %d, profile %d, summary %d bytes\n", n1, n2, n3, n4);
-	check("TEL-01", (n1 > 0) && (n2 > 0) && (n3 > 0) && (n4 > 0),
-	      "every periodic message fits in 200 bytes even with the largest numbers");
+	d.wifi = INT32_MIN;
+	ok = (tel_bin_telemetry(&d, buf, TEL_BIN_MAX) == 23) && (tel_bin_status(&d, buf, TEL_BIN_MAX) == 18);
+	check("TEL-02", ok && (tel_bin_telemetry(&d, buf, 22U) == -1),
+	      "extreme values saturate into the same sizes; a record that does not fit is refused");
+
+	memset(&d, 0, sizeof(d));
+	d.t_ms = 1000U;
+	d.state = VC_SAFE_STOP;
+	d.why = VC_WHY_IMPACT;
+	d.faults = FLT_IMPACT | FLT_WIFI_DOWN;
+	d.mc_fault = (int32_t)MC_FLT_ENCODER;
+	d.imu_ok = true;
+	d.heading_cdeg = -17950;
+	d.pings = 70000U;
+	d.wifi = -3;
+	d.mqtt_connects = 3U;
+	d.tx_drops = 5U;
+	d.rx_drops = 300U;
+	d.net_errors = 1U;
+	d.reconnect_ms = 9500U;
+	n = tel_bin_status(&d, buf, TEL_BIN_MAX);
+	r.rec = buf;
+	r.pos = 8U + 24U;
+	ok = (n == 18) && (bp_ru(&r, 4U) == (uint32_t)VC_SAFE_STOP) && (bp_ru(&r, 4U) == (uint32_t)VC_WHY_IMPACT) &&
+	     (bp_ru(&r, 12U) == (0x008U | 0x800U)) && (bp_ru(&r, 3U) == MC_FLT_ENCODER) && (bp_ru(&r, 1U) == 1U) &&
+	     (bp_rs(&r, 9U, -256) == -179) && (bp_ru(&r, 16U) == 65535U) && (bp_rs(&r, 3U, -4) == -3) &&
+	     (bp_ru(&r, 8U) == 3U) && (bp_ru(&r, 16U) == 5U) && (bp_ru(&r, 8U) == 255U) &&
+	     (bp_ru(&r, 8U) == 1U) && (bp_ru(&r, 18U) == 9500U) && (r.pos == 142U);
+	check("TEL-03", ok, "status: 142 bits = 18 B; the link state is only the WIFI_DOWN bit; the outage length is reported");
+	if (g_vec != NULL) {
+		hex_line(g_vec, "status", buf, n);
+	}
+
 	memset(&m, 0, sizeof(m));
-	m.type = EV_BARCODE;
-	m.p1 = '"';
-	n1 = tel_fmt_event(&m, buf, TEL_JSON_MAX);
-	buf[(n1 > 0) ? n1 : 0] = '\0';
-	check("TEL-02", (n1 > 0) && (strstr(buf, "\"c\":\"\\\"\"") != NULL), "a quote inside a string is escaped");
-	m.type = EV_LINE_STATUS;
-	check("TEL-03", tel_fmt_event(&m, buf, TEL_JSON_MAX) == 0, "line status is in the telemetry, not an event");
-	tj_begin(&j, small, sizeof(small));
-	tj_str(&j, "message", "far too long for this buffer");
-	check("TEL-04", tj_end(&j) == -1, "a message that does not fit is refused, never cut short");
-	d.v[0] = 212;
-	d.v[1] = 208;
-	n1 = tel_fmt_telemetry(&d, buf, TEL_JSON_MAX);
-	buf[(n1 > 0) ? n1 : 0] = '\0';
-	check("TEL-05", strstr(buf, "\"v\":[212,208]") != NULL, "wheel speeds as a pair");
+	m.type = EV_STOP_ACK;
+	check("TEL-04", tel_bin_event(&m, 0U, buf, TEL_BIN_MAX) == 0, "STOP_ACK is not published as an event");
+	m.type = EV_TERRAIN;
+	m.p1 = TERRAIN_CLIMBING;
+	m.p2 = -812;
+	n = tel_bin_event(&m, 70000U, buf, TEL_BIN_MAX);
+	r.rec = buf;
+	r.pos = 8U;
+	ok = (n == 9) && (bp_ru(&r, 24U) == 70000U) && (bp_ru(&r, 5U) == EV_TERRAIN) &&
+	     (bp_ru(&r, 2U) == TERRAIN_CLIMBING) && (bp_rs(&r, 14U, -8192) == -812);
+	check("TEL-05", ok, "event: 9 B, payload laid out exactly as APP_MSG");
+	if (g_vec != NULL) {
+		hex_line(g_vec, "event", buf, n);
+	}
+	n = tel_bin_ack(5U, 200U, false, CMD_ERR_REPEAT, buf, TEL_BIN_MAX);
+	check("TEL-06", (n == 6) && (buf[4] == 200U) && ((buf[5] & 1U) == 0U) && (((buf[5] >> 1) & 7U) == CMD_ERR_REPEAT),
+	      "ack: 6 B (seq, accepted, error)");
+	if (g_vec != NULL) {
+		hex_line(g_vec, "ack", buf, n);
+	}
+	memset(&p, 0, sizeof(p));
+	p.valid = true;
+	p.x_left_mm = -120;
+	p.x_right_mm = 60;
+	p.width_mm = 180;
+	p.x_center_mm = -30;
+	p.closest_mm = 300;
+	p.closest_deg = 95;
+	p.left_clear_mm = OS_CLEAR_OPEN;
+	p.right_clear_mm = 240;
+	p.unknown_left = 2U;
+	p.unknown_right = 0U;
+	p.npoints = 9U;
+	n = tel_bin_profile(77U, &p, buf, TEL_BIN_MAX);
+	check("TEL-07", n == 17, "profile: 17 B (the 13-byte OS_PROFILE_PK behind the header)");
+	if (g_vec != NULL) {
+		hex_line(g_vec, "profile", buf, n);
+	}
+	memset(&s, 0, sizeof(s));
+	s.t_ms = 99000U;
+	s.time_ms = 95000U;
+	s.dist_mm = -250;
+	s.hmax_mm = 21;
+	s.humps = 2U;
+	s.commands = 4U;
+	s.obstacles = 1U;
+	s.reads_ok = 4U;
+	s.reads_failed = 300U;
+	n = tel_bin_summary(&s, buf, TEL_BIN_MAX);
+	check("TEL-08", n == 16, "summary: 16 B");
+	if (g_vec != NULL) {
+		hex_line(g_vec, "summary", buf, n);
+	}
+	memset(&tm, 0, sizeof(tm));
+	tm.t_ms = 0xFFFFFFFFU;
+	for (k = 0U; k < TEL_TIM_TASKS; k++) {
+		tm.max_us[k] = 100U * (k + 1U);
+	}
+	tm.max_us[6] = 0xFFFFFFFFU;
+	tm.overruns = 3U;
+	tm.irq_per_s = 3300U;
+	tm.irq_max_us = 12U;
+	tm.vq_high = 4U;
+	tm.dropped = 0U;
+	tm.steer_lat_max_ms = 2;
+	tm.stop_lat_max_us = 450;
+	tm.stop_dist_mm = 31;
+	tm.reconnect_ms = 1000000U;
+	n = tel_bin_timing(&tm, buf, TEL_BIN_MAX);
+	check("TEL-09", (n == 34) && (n == (int32_t)TEL_BIN_MAX), "timing: 269 bits in 34 B, the largest record (NET_PAYLOAD_MAX)");
+	if (g_vec != NULL) {
+		hex_line(g_vec, "timing", buf, n);
+		hex_line(g_vec, "cmd_set", cmdb(201U, CMD_VERB_SET, 3, 50000), 4);
+		for (k = 1U; k <= EV_TYPE_MAX; k++) {	/* the decoder's event table must match */
+			fprintf(g_vec, "layout %u %u %d %u %d\n", k, app_evt_bits((uint8_t)k, 1U), (int)app_evt_min((uint8_t)k, 1U),
+				app_evt_bits((uint8_t)k, 2U), (int)app_evt_min((uint8_t)k, 2U));
+		}
+	}
+
+	check("EVT-01", evt_is_safety(EV_FAULT) && evt_is_safety(EV_IMPACT) && evt_is_safety(EV_ALERT) &&
+	      evt_is_safety(EV_STOP_ACK) && evt_is_safety(EV_BUTTON) && evt_is_safety(EV_COMMAND) &&
+	      evt_is_safety(EV_FAULT_CLEAR) && !evt_is_safety(EV_LINE_STATUS) && !evt_is_safety(EV_JUNCTION) &&
+	      !evt_is_safety(EV_DONE) && !evt_is_safety(EV_TERRAIN) && !evt_is_safety(EV_RANGE_ZONE),
+	      "queue policy: safety events must arrive, the rest may be dropped and counted");
 }
 
-int main(void)
+/* ---- minimum-bit layouts: motion (mc_core.h) ------------------------------------ */
+static int cmd_round(uint8_t type, int32_t a, int32_t b, int32_t c, MC_CMD *out)
 {
+	MC_CMD		in;
+	MC_CMD_PK	pk;
+
+	memset(&in, 0, sizeof(in));
+	in.type = type;
+	in.a = a;
+	in.b = b;
+	in.c = c;
+	mc_cmd_pack(&in, &pk);
+	mc_cmd_unpack(&pk, out);
+	return (out->type == type) && (out->a == a) && (out->b == b);
+}
+
+static void test_pack_motion(void)
+{
+	MC_CMD		o;
+	MC_SNAPSHOT	s, u;
+	MC_SNAP_PK	spk;
+	MC_ENC		e;
+	int		ok;
+
+	check("PK-M01", sizeof(MC_CMD_PK) == 8U, "MC_CMD_PK is 8 bytes (motion_cmd_q slot 12 B, was 20 B)");
+	ok = cmd_round(MC_CMD_DISTANCE, 10000, 400, 255, &o) && (o.c == 255) &&
+	     cmd_round(MC_CMD_DISTANCE, -10000, 1, 1, &o) && (o.c == 1);
+	check("PK-M02", ok, "DISTANCE round-trips at +-10,000 mm, speed 1..400, id 1..255");
+	ok = cmd_round(MC_CMD_TURN, 360, 0, 7, &o) && cmd_round(MC_CMD_TURN, -360, 400, 7, &o) && (o.c == 7);
+	check("PK-M03", ok, "TURN round-trips at +-360 deg, speed 0..400");
+	ok = cmd_round(MC_CMD_SPEED, -400, 400, 0, &o) && (o.c == 0) &&
+	     cmd_round(MC_CMD_SPEED, 400, -400, 65536 * 3, &o) && (o.c != 0) &&
+	     ((uint16_t)o.c == 0U);
+	check("PK-M04", ok, "SPEED round-trips at +-400; a line time with low 16 bits 0 is still 'present'");
+	(void)cmd_round(MC_CMD_DISTANCE, 20000, 600, 300, &o);
+	ok = (o.a == 16383) && (o.b == 511) && (o.c == 255);
+	(void)cmd_round(MC_CMD_SPEED, -900, 900, 0, &o);
+	ok = ok && (o.a == -512) && (o.b == 511);
+	check("PK-M05", ok, "out-of-range command fields saturate, never wrap");
+
+	memset(&s, 0, sizeof(s));
+	s.seq = 250U + 300U;			/* 8 bits: 550 & 255 = 38 */
+	s.t_ms = 65000U + 1000U;		/* 16 bits: wraps */
+	s.count[0] = 65500 + 100;
+	s.count[1] = -32768;
+	s.speed[0] = -469;
+	s.speed[1] = 511;
+	s.target[0] = -400;
+	s.target[1] = 400;
+	s.duty[0] = -1000;
+	s.duty[1] = 1000;
+	s.speed_mm_s = -300;
+	s.accel_mm_s2 = -9380;
+	s.dist_mm = -16777216;
+	s.odo_mm = 16777215;
+	s.yaw_cdeg_s = -41300;
+	s.mode = MC_FAULT;
+	s.fault_bits = MC_FLT_STALL | MC_FLT_ENCODER;
+	s.steer_lat_ms = 3;
+	s.steer_lat_max_ms = 1023;
+	s.stop_lat_max_us = 131071;
+	s.stop_dist_mm = 1023;
+	s.stop_decel_mm_s2 = 20000;
+	mc_snap_pack(&s, &spk);
+	mc_snap_unpack(&spk, &u);
+	ok = (sizeof(MC_SNAP_PK) == 36U) && (u.seq == 38U) && (u.t_ms == ((65000U + 1000U) & 0xFFFFU)) &&
+	     ((uint16_t)u.count[0] == (uint16_t)(65500 + 100)) && (u.count[1] == -32768) &&
+	     (u.speed[0] == -469) && (u.speed[1] == 511) && (u.target[0] == -400) && (u.target[1] == 400) &&
+	     (u.duty[0] == -1000) && (u.duty[1] == 1000) && (u.speed_mm_s == -300) &&
+	     (u.accel_mm_s2 == -9380) && (u.dist_mm == -16777216) && (u.odo_mm == 16777215) &&
+	     (u.yaw_cdeg_s == -41300) && (u.mode == MC_FAULT) && (u.fault_bits == s.fault_bits) &&
+	     (u.steer_lat_ms == 3) && (u.steer_lat_max_ms == 1023) && (u.stop_lat_max_us == 131071) &&
+	     (u.stop_dist_mm == 1023) && (u.stop_decel_mm_s2 == 20000);
+	check("PK-M06", ok, "snapshot (36 B) round-trips every field at its min / max");
+	s.speed[0] = 2000;
+	s.odo_mm = 20000000;
+	s.stop_lat_max_us = 500000;
+	s.steer_lat_ms = -5;
+	s.stop_decel_mm_s2 = 40000;
+	mc_snap_pack(&s, &spk);
+	mc_snap_unpack(&spk, &u);
+	check("PK-M07", (u.speed[0] == 511) && (u.odo_mm == 16777215) && (u.stop_lat_max_us == 131071) &&
+	      (u.steer_lat_ms == 0) && (u.stop_decel_mm_s2 == 32767), "out-of-range snapshot fields saturate, never wrap");
+
+	/* encoder word: 16-bit halves that wrap, 32-bit positions in the task */
+	mc_enc_init(&e, 65500U | (65500U << 16));
+	mc_enc_update(&e, (uint32_t)(uint16_t)(65500U + 100U) | ((uint32_t)(uint16_t)(65500U - 100U) << 16));
+	ok = (e.pos[MC_LEFT] == -36 + 100) && (e.pos[MC_RIGHT] == -36 - 100);
+	{
+		uint32_t	i;
+		uint32_t	l = 65500U;
+
+		for (i = 0U; i < 5000U; i++) {	/* 16 counts per 20 ms read, forward */
+			l += 16U;
+			mc_enc_update(&e, (uint32_t)(uint16_t)l | (e.last & 0xFFFF0000U));
+		}
+	}
+	ok = ok && (e.pos[MC_LEFT] == -36 + 80000);
+	check("PK-M08", ok, "encoder halves cross the 16-bit wrap (start 65,500); 80,000 counts summed in 32 bits");
+
+	/* the odometer read on its own: the fields either side all ones */
+	{
+		static const int32_t	odo[] = {0, 2413, 16777215, 20000000};
+		static const int32_t	want[] = {0, 2413, 16777215, 16777215};
+		uint32_t		i;
+
+		ok = true;
+		s.dist_mm = 16777215;
+		s.yaw_cdeg_s = 65535;
+		for (i = 0U; i < (sizeof(odo) / sizeof(odo[0])); i++) {
+			s.odo_mm = odo[i];
+			mc_snap_pack(&s, &spk);
+			mc_snap_unpack(&spk, &u);
+			ok = ok && (mc_snap_odo(&spk) == want[i]) && (u.odo_mm == want[i]);
+		}
+	}
+	check("PK-M09", ok, "mc_snap_odo() reads the same odometer as a full unpack (0, 2413, max, saturated)");
+}
+
+/* ===== the 8-byte event record: every type at its limits ==================== */
+static bool evt_round_trip(uint8_t type, int32_t p1, int32_t p2, int32_t want1, int32_t want2)
+{
+	APP_EVT	e = {type, SRC_VC, 255U, 65535U, p1, p2};
+	APP_EVT	u;
+	APP_MSG	m;
+
+	app_msg_pack(&e, &m);
+	app_msg_unpack(&m, &u);
+	return (u.type == type) && (u.source == SRC_VC) && (u.seq == 255U) && (u.t_ms == 65535U) &&
+	       (u.p1 == want1) && (u.p2 == want2);
+}
+
+static void test_pack_events(void)
+{
+	bool		lim = (sizeof(APP_MSG) == 8U);
+	bool		sat = true;
+	uint32_t	k;
+	uint32_t	src;
+
+	for (k = 1U; k <= EV_TYPE_MAX; k++) {
+		uint8_t		t = (uint8_t)k;
+		uint32_t	n1 = app_evt_bits(t, 1U);
+		uint32_t	n2 = app_evt_bits(t, 2U);
+		int32_t		lo1 = (n1 == 0U) ? 0 : app_evt_min(t, 1U);
+		int32_t		lo2 = (n2 == 0U) ? 0 : app_evt_min(t, 2U);
+		int32_t		hi1 = (n1 == 0U) ? 0 : (int32_t)((int64_t)lo1 + (int64_t)BP_MAX(n1));
+		int32_t		hi2 = (n2 == 0U) ? 0 : (int32_t)((int64_t)lo2 + (int64_t)BP_MAX(n2));
+
+		lim = lim && ((n1 + n2) <= 32U) && evt_round_trip(t, lo1, lo2, lo1, lo2) &&
+		      evt_round_trip(t, hi1, hi2, hi1, hi2);
+		if (t != EV_FAULT) {			/* a bit mask: masked, see below */
+			sat = sat && evt_round_trip(t, lo1 - 1, lo2 - 1, lo1, lo2) &&
+			      evt_round_trip(t, hi1 + 1, hi2 + 1, hi1, hi2);
+		}
+	}
+	check("EVT-02", lim, "every event type round-trips p1 and p2 at their min and max (8 B, payload <= 32 bits)");
+	check("EVT-03", sat, "every event type saturates values below the min or above the max, never wraps");
+	sat = evt_round_trip(EV_FAULT, (int32_t)FLT_ALL, 0, (int32_t)FLT_ALL, 0) &&
+	      evt_round_trip(EV_FAULT, (int32_t)(FLT_ALL | FLT_NO_ECHO), 0, (int32_t)FLT_ALL, 0);
+	for (src = 0U; src < 8U; src++) {	/* 3-bit source, 8-bit seq, 16-bit time */
+		APP_EVT	e = {EV_HUMP, (uint8_t)src, (uint8_t)(src * 37U), (uint16_t)(src * 9000U), 18, 25};
+		APP_EVT	u;
+		APP_MSG	m;
+
+		app_msg_pack(&e, &m);
+		app_msg_unpack(&m, &u);
+		sat = sat && (u.source == src) && (u.seq == e.seq) && (u.t_ms == e.t_ms);
+	}
+	check("EVT-04", sat && evt_round_trip(EV_BUTTON, BTN_STOP, 0, BTN_STOP, 0),
+	      "fault mask keeps the 10 latching bits only; header fields and the 1-bit button round-trip");
+}
+
+/* ===== obstacle scan and VC layouts ========================================== */
+static void test_pack_scan(void)
+{
+	SCAN_REQ	r = {SCAN_WATCH | SCAN_STOP_FLAG, 120, 255}, u;
+	SCAN_REQ_PK	rpk;
+	OS_PROFILE	p, q;
+	OS_PROFILE_PK	ppk;
+	VC_ST		v = {VC_HALTED, VC_WHY_BYPASS_TIMEOUT, LB_CMD_U_TURN, 300U, 200U, 4000000000U, 16777215, 32U};
+	VC_ST		w;
+	VC_ST_PK	vpk;
+	SCAN_ST		sst, sst2;
+	uint32_t	sw;
+	bool		ok;
+
+	scan_req_pack(&r, &rpk);
+	scan_req_unpack(&rpk, &u);
+	ok = (sizeof(SCAN_REQ_PK) == 4U) && (u.mode == r.mode) && (u.stop_mm == 120) && (u.id == 255) &&
+	     (rpk.w < (1U << 20));
+	r.stop_mm = 600;
+	scan_req_pack(&r, &rpk);
+	scan_req_unpack(&rpk, &u);
+	ok = ok && (u.stop_mm == 600);
+	r.stop_mm = 0;
+	scan_req_pack(&r, &rpk);
+	scan_req_unpack(&rpk, &u);
+	ok = ok && (u.stop_mm == 0);
+	check("PK-S01", ok, "SCAN_REQ (4 B, 20 bits): stop 120 / 600 / 0 = default and id 255 round-trip");
+	r.stop_mm = 5000;
+	scan_req_pack(&r, &rpk);
+	scan_req_unpack(&rpk, &u);
+	ok = (u.stop_mm == 630);
+	r.stop_mm = 50;
+	scan_req_pack(&r, &rpk);
+	scan_req_unpack(&rpk, &u);
+	check("PK-S02", ok && (u.stop_mm == 120), "out-of-range stop distances saturate, never become 'default'");
+
+	ok = (scan_range_mm(0U) == 0) && (scan_range_mm(23323U) == 3999) && (scan_range_mm(23324U) == 4000) &&
+	     (scan_range_mm(23330U) == OS_INVALID) && (scan_range_mm(32767U) == OS_INVALID) &&
+	     (scan_range_mm(0xFFFFFFFFU) == OS_INVALID) && (OS_INVALID == 4095);
+	check("PK-S03", ok, "echo width -> 12-bit range; past 4,000 mm (~23.3 ms) is 4,095 = no echo, never 904 mm");
+
+	memset(&p, 0, sizeof(p));
+	p.valid = true;
+	p.x_left_mm = -1024;
+	p.x_right_mm = 1023;
+	p.width_mm = 2047;
+	p.x_center_mm = -5;
+	p.closest_mm = 800;
+	p.closest_deg = 150;
+	p.left_clear_mm = OS_CLEAR_OPEN;
+	p.right_clear_mm = 0;
+	p.unknown_left = SCAN_SLOTS;
+	p.unknown_right = 1U;
+	p.npoints = 31U;
+	os_profile_pack(&p, &ppk);
+	os_profile_unpack(&ppk, &q);
+	ok = (sizeof(OS_PROFILE_PK) == 13U) && q.valid && (q.x_left_mm == -1024) && (q.x_right_mm == 1023) &&
+	     (q.width_mm == 2047) && (q.x_center_mm == -5) && (q.closest_mm == 800) && (q.closest_deg == 150) &&
+	     (q.left_clear_mm == OS_CLEAR_OPEN) && (q.right_clear_mm == 0) && (q.unknown_left == SCAN_SLOTS) &&
+	     (q.unknown_right == 1U) && (q.npoints == 31U);
+	check("PK-S04", ok, "OS_PROFILE (13 B, 97 bits) round-trips every field at its limits");
+	p.x_left_mm = -3000;
+	p.closest_mm = 5000;
+	p.npoints = OS_MAX_POINTS;
+	os_profile_pack(&p, &ppk);
+	os_profile_unpack(&ppk, &q);
+	check("PK-S05", (q.x_left_mm == -1024) && (q.closest_mm == 1023) && (q.npoints == 31U),
+	      "profile fields saturate, never wrap");
+
+	vc_st_pack(&v, &vpk);
+	vc_st_unpack(&vpk, &w);
+	ok = (w.state == VC_HALTED) && (w.why == VC_WHY_BYPASS_TIMEOUT) && (w.pending == LB_CMD_U_TURN) &&
+	     (w.commands_done == 255U) && (w.obstacles_passed == 127U) && (w.run_start_ms == 4000000000U) &&
+	     (w.run_start_odo == 16777215) && (w.vq_high == 32U);
+	check("PK-S06", ok && (VC_STATES <= 16), "VC status: 14 states and 10 reasons in 4 bits each; counts saturate");
+
+	sst.mode = SCAN_PROFILE;
+	sst.range_mm = OS_INVALID;
+	sst.pings = 65535U;
+	sw = scan_st_pack(&sst);
+	scan_st_unpack(sw, &sst2);
+	ok = (sw < (1UL << 30)) && (sst2.mode == SCAN_PROFILE) && (sst2.range_mm == OS_INVALID) && (sst2.pings == 65535U);
+	sst.mode = SCAN_WATCH;
+	sst.range_mm = 0;
+	sst.pings = 65536U + 7U;		/* the counter wraps: only the low 16 bits are shared */
+	scan_st_unpack(scan_st_pack(&sst), &sst2);
+	ok = ok && (sst2.mode == SCAN_WATCH) && (sst2.range_mm == 0) && (sst2.pings == 7U);
+	sst.range_mm = 9000;			/* out of range: saturates, never wraps */
+	scan_st_unpack(scan_st_pack(&sst), &sst2);
+	ok = ok && (sst2.range_mm == 4095);
+	check("PK-S07", ok, "Scan status in one word (30 bits): mode 2, range 12 (saturates), pings low 16");
+}
+
+int main(int argc, char **argv)
+{
+	if ((argc == 3) && (strcmp(argv[1], "--vectors") == 0)) {
+		g_vec = fopen(argv[2], "w");	/* records for tools/test_mqtt_decode.py */
+	}
 	test_code39();
 	test_barcode();
 	test_line();
 	test_motion();
+	test_pack_motion();
 	test_imu();
+	test_imu_level();
+	test_pack_imu();
 	test_safety();
 	test_profile();
 	test_scan();
+	test_pack_events();
+	test_pack_scan();
 	test_vc();
+	test_vc_watchdog();
+	test_vc_search_sweep();
+	test_vc_hump();
 	test_cmd();
 	test_tel();
+	if (g_vec != NULL) {
+		(void)fclose(g_vec);
+	}
 	printf("\nUNIT: %d checks, %d failed\n", g_n, g_fail);
 	return (g_fail == 0) ? 0 : 1;
 }

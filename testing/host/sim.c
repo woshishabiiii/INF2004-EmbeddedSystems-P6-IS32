@@ -19,7 +19,7 @@
 
 #include "../../app_program/app_evt.h"
 #include "../../app_program/subsystem1/cmd_parse.h"
-#include "../../app_program/subsystem1/tel_json.h"
+#include "../../app_program/subsystem1/tel_bin.h"
 #include "../../app_program/subsystem2/mc_core.h"
 #include "../../app_program/subsystem2/motion_cfg.h"
 #include "../../app_program/subsystem3/line_core.h"
@@ -41,6 +41,7 @@
 #define VCQ_CAP		32
 #define TELQ_CAP	16
 #define EDGE_CAP	64
+#define BC_EDGE_TIME_SIM 0x7FFFFFFFU	/* BC_EDGE_TIME (drv_barcode.h is kernel-side) */
 #define MAX_SCRIPT	16
 #define NAV_CODES	(NAV_REFUSED + 1)
 
@@ -57,38 +58,40 @@ typedef struct {
 
 static bool q_push(QUEUE *q, uint8_t src, uint8_t type, int32_t p1, int32_t p2, uint32_t t_ms)
 {
-	APP_MSG *m;
+	APP_EVT e;
 
 	if (q->n >= q->cap) {
 		q->drops++;
 		return false;
 	}
-	m = &q->m[(q->head + q->n) % q->cap];
-	m->type = type;
-	m->source = src;
-	m->seq = 0;
-	m->t_ms = t_ms;
-	m->p1 = p1;
-	m->p2 = p2;
+	/* packed exactly as app_send() does on the car (8 bytes, 16-bit time) */
+	e.type = type;
+	e.source = src;
+	e.seq = 0;
+	e.t_ms = (uint16_t)t_ms;
+	e.p1 = p1;
+	e.p2 = p2;
+	app_msg_pack(&e, &q->m[(q->head + q->n) % q->cap]);
 	q->n++;
 	return true;
 }
 
-static bool q_pop(QUEUE *q, APP_MSG *out)
+static bool q_pop(QUEUE *q, APP_EVT *out)
 {
 	if (q->n == 0) {
 		return false;
 	}
-	*out = q->m[q->head];
+	app_msg_unpack(&q->m[q->head], out);
 	q->head = (q->head + 1) % q->cap;
 	q->n--;
 	return true;
 }
 
 /* ---- scenario script -------------------------------------------------------- */
-#define SC_CMD		1	/* MQTT command text */
+#define SC_CMD		1	/* MQTT command, written as text here and sent as 4 bytes */
 #define SC_BUTTON	2	/* a = 20 / 21 */
 #define SC_IMU_FAIL	3	/* a = 1 fail, 0 ok */
+#define SC_IMU_TILT	4	/* a = extra IMU tilt, tenths of a degree */
 
 typedef struct {
 	uint32_t	t_ms;
@@ -109,24 +112,24 @@ typedef struct {
 	/* kernel objects */
 	QUEUE		vcq;
 	QUEUE		telq;
-	MC_CMD		mq[MCQ_CAP];
+	MC_CMD_PK	mq[MCQ_CAP];		/* packed, as in motion_cmd_q */
 	int		mq_n;
-	SCAN_REQ	sq[SCQ_CAP];
+	SCAN_REQ_PK	sq[SCQ_CAP];		/* packed, as in scan_request_q */
 	int		sq_n;
 	uint32_t	stop_flags;
 	uint32_t	fault_flags;
-	uint32_t	health[HEALTH_SLOTS];
+	uint16_t	health[HEALTH_SLOTS];	/* 16-bit stamps, as task_safety.c */
 
 	/* subsystem 2 */
 	MC_CORE		mc;
+	MC_ENC		enc;			/* 16-bit encoder word -> 32-bit positions */
 	MC_SNAPSHOT	snap;
 	uint32_t	stop_req_us;
 	bool		was_stopped;
 	/* subsystem 3 */
 	LC_CORE		lc;
 	BC_CORE		bc;
-	uint32_t	edge_t[EDGE_CAP];
-	uint8_t		edge_l[EDGE_CAP];
+	uint32_t	edge[EDGE_CAP];	/* as drv_barcode.c: 31-bit us time | level << 31 */
 	int		edge_n;
 	bool		bc_level;
 	/* subsystem 4 */
@@ -154,6 +157,12 @@ typedef struct {
 	/* observations */
 	uint32_t	states_seen;
 	int		nav[NAV_CODES];
+	double		rest_gap;	/* sensor to obstacle when the car first stopped for it, -1 = never */
+	int		turns;		/* spins commanded */
+	int		slopes;		/* CLIMBING / DESCENDING reported */
+	int32_t		prev_target[2];	/* wheel targets at the last step */
+	int32_t		max_step;	/* largest change of a wheel target in one update, following */
+	int32_t		max_over;	/* largest wheel target above base_speed, following */
 	int32_t		nav_last[NAV_CODES];
 	char		barcodes[16];
 	int		nbarcodes;
@@ -164,10 +173,12 @@ typedef struct {
 	double		max_dev_all;
 	uint32_t	follow_ms;
 	double		sum_dev;
-	int		json_max;
-	int		json_fail;
-	int		json_n;
+	int		msg_max;
+	int		msg_fail;
+	int		msg_n;
 	int		queue_errors;
+	bool		line_resend;	/* a LINE_STATUS was dropped (task_line.c) */
+	bool		terrain_resend;	/* a TERRAIN change was dropped (task_imu.c) */
 	int32_t		last_why;
 	uint32_t	stop_cmd_us;
 	uint32_t	stop_latency_us;
@@ -186,17 +197,17 @@ static void trace(SIM *s, const char *fmt, const char *a, int32_t b, int32_t c)
 }
 
 /* ---- telemetry (subsystem 1) ------------------------------------------------ */
-static void json_check(SIM *s, int32_t n)
+static void msg_check(SIM *s, int32_t n)
 {
 	if (n < 0) {
-		s->json_fail++;
+		s->msg_fail++;
 	} else if (n > 0) {
-		s->json_n++;
-		if (n > s->json_max) {
-			s->json_max = n;
+		s->msg_n++;
+		if (n > s->msg_max) {
+			s->msg_max = n;
 		}
-		if (n > (int32_t)TEL_JSON_MAX) {
-			s->json_fail++;
+		if (n > (int32_t)TEL_BIN_MAX) {
+			s->msg_fail++;
 		}
 	} else {
 		/* not published */
@@ -205,22 +216,25 @@ static void json_check(SIM *s, int32_t n)
 
 static void telemetry_step(SIM *s, bool periodic, bool heartbeat)
 {
-	APP_MSG		m;
-	char		buf[TEL_JSON_MAX];
+	APP_EVT		m;
+	uint8_t		buf[TEL_BIN_MAX];
 	TEL_DATA	d;
 
 	while (q_pop(&s->telq, &m)) {
 		if (m.type == EV_PROFILE_DATA) {
-			json_check(s, tel_fmt_profile(m.t_ms, s->prof.valid, s->prof.x_left_mm,
-						      s->prof.x_right_mm, s->prof.closest_mm, s->prof.closest_deg,
-						      s->prof.left_clear_mm, s->prof.right_clear_mm,
-						      s->prof.unknown_left, s->prof.unknown_right, buf, TEL_JSON_MAX));
+			msg_check(s, tel_bin_profile(s->t_ms, &s->prof, buf, TEL_BIN_MAX));
 		} else {
-			json_check(s, tel_fmt_event(&m, buf, TEL_JSON_MAX));
+			msg_check(s, tel_bin_event(&m, s->t_ms, buf, TEL_BIN_MAX));
 		}
 		if (m.type == EV_STATE) {
 			s->states_seen |= 1U << m.p1;
-			if (m.p1 == VC_SAFE_STOP) {
+			if ((m.p1 == VC_SCANNING) && (s->rest_gap < 0.0)) {
+				CAR ahead = s->car;	/* the scan may already be turning the servo */
+
+				ahead.servo_deg = 90.0;
+				s->rest_gap = us_range(&ahead, &s->w);	/* stopped at the obstacle */
+			}
+			if ((m.p1 == VC_SAFE_STOP) || (m.p1 == VC_HALTED)) {
 				s->last_why = m.p2;
 			}
 		} else if (m.type == EV_NAV) {
@@ -234,6 +248,10 @@ static void telemetry_step(SIM *s, bool periodic, bool heartbeat)
 			}
 		} else if (m.type == EV_BARCODE_BAD) {
 			s->bad_reads++;
+		} else if (m.type == EV_TERRAIN) {
+			if (m.p1 != TERRAIN_LEVEL) {
+				s->slopes++;
+			}
 		} else if (m.type == EV_HUMP) {
 			if (s->nhumps < 8) {
 				s->humps[s->nhumps++] = m.p1;
@@ -260,19 +278,48 @@ static void telemetry_step(SIM *s, bool periodic, bool heartbeat)
 		d.pitch_cdeg = s->imu.pitch_cdeg;
 		d.hmax_mm = s->imu.max_hump_mm;
 		d.range_mm = s->sc.last_range;
-		d.faults = s->sm.latched;
-		json_check(s, tel_fmt_telemetry(&d, buf, TEL_JSON_MAX));
-		json_check(s, tel_fmt_status(&d, buf, TEL_JSON_MAX));
+		d.faults = s->sm.latched | (s->fault_flags & FLT_STATUS);
+		msg_check(s, tel_bin_telemetry(&d, buf, TEL_BIN_MAX));
+		msg_check(s, tel_bin_status(&d, buf, TEL_BIN_MAX));
 	}
+}
+
+/* The laptop side: "<seq> <VERB> [<name> <value>]" -> the 4 command bytes
+   (what tools/mqtt_decode.py --cmd sends).  Test code only. */
+static void cmd_from_text(const char *text, uint8_t out[CMD_BYTES])
+{
+	static const char * const verbs[] = {"", "START", "STOP", "RESTART", "FINISH", "SET"};
+	char	verb[16] = "", name[16] = "";
+	int	seq = 0, value = 0, n;
+	CMD	c;
+	size_t	i;
+
+	n = sscanf(text, "%d %15s %15s %d", &seq, verb, name, &value);
+	memset(&c, 0, sizeof(c));
+	c.seq = (uint32_t)seq & 0xFFU;
+	for (i = 1U; i < sizeof(verbs) / sizeof(verbs[0]); i++) {
+		if (strcmp(verb, verbs[i]) == 0) {
+			c.verb = (int32_t)i;
+		}
+	}
+	for (i = 0U; (n == 4) && (i < CMD_NPARAMS); i++) {
+		if (strcmp(name, cmd_params[i].name) == 0) {
+			c.param = (int32_t)i;
+			c.value = value;
+		}
+	}
+	cmd_encode(&c, out);
 }
 
 static void command_text(SIM *s, const char *text)
 {
 	CMD		c;
 	cmd_err_t	r;
-	char		buf[TEL_JSON_MAX];
+	uint8_t		cmd[CMD_BYTES];
+	uint8_t		buf[TEL_BIN_MAX];
 
-	r = cmd_parse(text, (uint32_t)strlen(text), &s->last_seq,
+	cmd_from_text(text, cmd);
+	r = cmd_parse(cmd, CMD_BYTES, &s->last_seq,
 		      (s->vc.state == VC_READY) || (s->vc.state == VC_FINISHED), &c);
 	if (r == CMD_OK) {
 		if (c.verb == CMD_VERB_SET) {
@@ -283,20 +330,40 @@ static void command_text(SIM *s, const char *text)
 			/* forwarded */
 		}
 	}
-	json_check(s, tel_fmt_ack(s->t_ms, c.seq, r == CMD_OK, (int32_t)r, buf, TEL_JSON_MAX));
+	msg_check(s, tel_bin_ack(s->t_ms, c.seq, r == CMD_OK, (int32_t)r, buf, TEL_BIN_MAX));
 	trace(s, "cmd \"%s\" -> %d %d", text, (int32_t)r, 0);
 }
 
 /* ---- motion control (mirrors task_motion.c) ----------------------------------- */
-static void push_list_vc(SIM *s, uint8_t src, const EVT_LIST *l)
+/* app_send_events(): a safety event that does not fit is a fault; any
+   other event is dropped and counted (q->drops).  Returns the dropped mask. */
+static uint32_t push_list_vc(SIM *s, uint8_t src, const EVT_LIST *l)
 {
-	uint32_t i;
+	uint32_t i, mask = 0U;
 
 	for (i = 0U; i < l->n; i++) {
 		if (!q_push(&s->vcq, src, l->ev[i].type, l->ev[i].p1, l->ev[i].p2, s->t_ms)) {
-			s->fault_flags |= FLT_QUEUE_OVF;
+			if (evt_is_safety(l->ev[i].type)) {
+				s->fault_flags |= FLT_QUEUE_OVF;
+			} else {
+				mask |= 1UL << i;
+			}
 		}
 	}
+	return mask;
+}
+
+/* The encoder word as drv_encoder.c keeps it: two 16-bit counts that wrap.
+   It starts at 65,500 so every run crosses the 16-bit wrap within the
+   first 36 counts (wraparound test, Version C). */
+#define SIM_ENC_START	65500U
+
+static uint32_t enc_word(const SIM *s)
+{
+	uint32_t l = (uint32_t)(uint16_t)((uint32_t)car_count(&s->car, 0) + SIM_ENC_START);
+	uint32_t r = (uint32_t)(uint16_t)((uint32_t)car_count(&s->car, 1) + SIM_ENC_START);
+
+	return l | (r << 16);
 }
 
 static void motion_step(SIM *s, bool tick)
@@ -308,29 +375,42 @@ static void motion_step(SIM *s, bool tick)
 
 	in.now_ms = s->t_ms;
 	in.now_us = s->t_us;
-	in.count[0] = car_count(&s->car, 0);
-	in.count[1] = car_count(&s->car, 1);
+	mc_enc_update(&s->enc, enc_word(s));
+	in.count[0] = s->enc.pos[0];
+	in.count[1] = s->enc.pos[1];
 	in.cmd_stop = (s->stop_flags & MC_CMD_STOP) != 0U;
 	in.fault_stop = (s->stop_flags & MC_FAULT_STOP) != 0U;
 	in.stop_req_us = s->stop_req_us;
 	in.tick = tick;
 	in.ncmd = 0U;
 	in.cmd = cmds;
-	if (tick) {
-		for (i = 0; i < s->mq_n; i++) {
-			cmds[i] = s->mq[i];
-		}
-		in.ncmd = (uint32_t)s->mq_n;
-		s->mq_n = 0;
+	for (i = 0; i < s->mq_n; i++) {		/* commands on every wake-up */
+		mc_cmd_unpack(&s->mq[i], &cmds[i]);
 	}
+	in.ncmd = (uint32_t)s->mq_n;
+	s->mq_n = 0;
 	if (s->was_stopped && !in.cmd_stop && !in.fault_stop) {
 		mc_core_tune(&s->mc, s->params[2], s->params[3], s->params[4], s->params[5]);
 	}
 	s->was_stopped = in.cmd_stop || in.fault_stop;
 
 	mc_core_step(&s->mc, &in, &out);
+	if (s->vc.state == VC_FOLLOW) {	/* smoothness while following: any update */
+		int w;
+
+		for (w = 0; w < 2; w++) {
+			int32_t step = abs(s->mc.w[w].target - s->prev_target[w]);
+			int32_t over = s->mc.w[w].target - s->vc.p.base_speed;
+
+			s->max_step = (step > s->max_step) ? step : s->max_step;
+			s->max_over = (over > s->max_over) ? over : s->max_over;
+		}
+	}
+	s->prev_target[0] = s->mc.w[0].target;
+	s->prev_target[1] = s->mc.w[1].target;
 	s->car.duty[0] = out.duty[0];
 	s->car.duty[1] = out.duty[1];
+	s->car.coast = out.coast;
 	if (s->measure_stop && (out.duty[0] == 0) && (out.duty[1] == 0)) {
 		s->stop_latency_us = s->t_us - s->stop_cmd_us;
 		s->measure_stop = false;
@@ -340,16 +420,21 @@ static void motion_step(SIM *s, bool tick)
 	}
 	if (out.fault) {
 		s->stop_flags |= MC_FAULT_STOP;
-		s->fault_flags |= FLT_MOTION;
-		trace(s, "MC own fault %s%d %d", "", s->mc.snap.fault_code, 0);
+		s->fault_flags |= ((s->mc.snap.fault_bits & MC_FLT_STALL) != 0U) ? FLT_STALL : 0U;
+		s->fault_flags |= ((s->mc.snap.fault_bits & MC_FLT_TIMEOUT) != 0U) ? FLT_MOVE_TIMEOUT : 0U;
+		s->fault_flags |= ((s->mc.snap.fault_bits & MC_FLT_ENCODER) != 0U) ? FLT_ENCODER : 0U;
+		trace(s, "MC own fault %s%d %d", "", (int32_t)s->mc.snap.fault_bits, 0);
 	}
 	for (i = 0; i < (int)out.ev.n; i++) {
 		trace(s, "MC event %s%d p2 %d", "", out.ev.ev[i].type, out.ev.ev[i].p2);
 	}
 	push_list_vc(s, SRC_MOTION, &out.ev);
 	if (tick) {
-		s->snap = s->mc.snap;
-		s->health[HEALTH_MOTION] = s->t_ms | 1U;
+		MC_SNAP_PK pk;
+
+		mc_snap_pack(&s->mc.snap, &pk);		/* readers see the packed copy */
+		mc_snap_unpack(&pk, &s->snap);
+		s->health[HEALTH_MOTION] = (uint16_t)(s->t_ms | 1U);
 	}
 }
 
@@ -367,7 +452,7 @@ static void safety_apply(SIM *s, const SM_OUT *out)
 		trace(s, "SAFETY release%s %d %d", "", 0, 0);
 	}
 	if (out->clear_flags) {
-		s->fault_flags = 0U;
+		s->fault_flags &= FLT_STATUS;	/* keep the status bits */
 	}
 	if (out->set_restart) {
 		s->fault_flags |= FLT_RESTART_REQ;
@@ -392,12 +477,7 @@ static void safety_poll(SIM *s)
 	SM_OUT		out;
 	uint32_t	age[HEALTH_SLOTS];
 	bool		alive[HEALTH_SLOTS];
-	uint32_t	i;
-
-	for (i = 0U; i < HEALTH_SLOTS; i++) {
-		alive[i] = (s->health[i] != 0U);
-		age[i] = s->t_ms - s->health[i];
-	}
+	sm_health_ages(&s->sm, s->t_ms, s->health, age, alive);
 	sm_on_poll(&s->sm, (uint32_t)s->btn[0], (uint32_t)s->btn[1], age, alive, &out);
 	safety_apply(s, &out);
 }
@@ -408,18 +488,28 @@ static void line_step(SIM *s)
 	EVT_LIST	ev;
 	BC_RESULT	res;
 	int		i;
+	uint32_t	mask, k;
 	bool		l = car_sensor_black(&s->car, &s->w, CAR_LINE_FWD, CAR_LINE_HALF);
 	bool		r = car_sensor_black(&s->car, &s->w, CAR_LINE_FWD, -CAR_LINE_HALF);
 
 	evt_list_clear(&ev);
 	lc_step(&s->lc, l, r, s->t_ms, s->snap.odo_mm, &ev);
-	push_list_vc(s, SRC_LINE, &ev);
+	if (s->line_resend && ((ev.n == 0U) || (ev.ev[0].type != EV_LINE_STATUS))) {
+		(void)evt_list_add(&ev, EV_LINE_STATUS, l ? 1 : 0, r ? 1 : 0);
+	}
+	s->line_resend = false;
+	mask = push_list_vc(s, SRC_LINE, &ev);
+	for (k = 0U; k < ev.n; k++) {
+		if ((ev.ev[k].type == EV_LINE_STATUS) && ((mask & (1UL << k)) != 0U)) {
+			s->line_resend = true;
+		}
+	}
 	if ((getenv("SIM_LINE") != NULL) && (ev.n > 0U) && (ev.ev[0].type == EV_LINE_STATUS)) {
 		trace(s, "line %s%d%d", "", l ? 1 : 0, r ? 1 : 0);
 	}
 
 	for (i = 0; i < s->edge_n; i++) {
-		bc_edge(&s->bc, s->edge_t[i], s->edge_l[i]);
+		bc_edge(&s->bc, s->edge[i] & BC_EDGE_TIME_SIM, ((s->edge[i] >> 31) != 0U) ? 1U : 0U);
 	}
 	s->edge_n = 0;
 	if (bc_poll(&s->bc, s->t_us, &res)) {
@@ -429,9 +519,9 @@ static void line_step(SIM *s)
 		} else {
 			(void)evt_list_add(&ev, EV_BARCODE_BAD, (int32_t)res.result, (int32_t)res.elements);
 		}
-		push_list_vc(s, SRC_LINE, &ev);
+		(void)push_list_vc(s, SRC_LINE, &ev);
 	}
-	s->health[HEALTH_LINE] = s->t_ms | 1U;
+	s->health[HEALTH_LINE] = (uint16_t)(s->t_ms | 1U);
 }
 
 /* ---- IMU (mirrors task_imu.c) ------------------------------------------------------ */
@@ -448,6 +538,8 @@ static void imu_step(SIM *s)
 	mot.speed_mm_s = s->snap.speed_mm_s;
 	mot.accel_mm_s2 = s->snap.accel_mm_s2;
 	mot.yaw_cdeg_s = s->snap.yaw_cdeg_s;
+	mot.running = vc_is_running((int32_t)s->vc.state);	/* task_imu.c: vc_get_status() */
+	mot.waiting = (s->vc.state == VC_READY);
 	imu_core_step(&s->imu, a, !s->imu_fail, &mot, s->t_ms, &out);
 	if (out.fault && (IMU_REQUIRED != 0)) {
 		s->fault_flags |= FLT_IMU;
@@ -455,12 +547,21 @@ static void imu_step(SIM *s)
 	if (out.impact && (IMU_IMPACT_STOPS != 0)) {
 		s->fault_flags |= FLT_IMPACT;
 	}
+	if (s->terrain_resend) {
+		s->terrain_resend = !q_push(&s->vcq, SRC_IMU, EV_TERRAIN, s->imu.terrain, s->imu.pitch_cdeg, s->t_ms);
+	}
 	for (i = 0U; i < out.ev.n; i++) {
-		const APP_MSG *m = &out.ev.ev[i];
+		const APP_EVT *m = &out.ev.ev[i];
 
 		if ((m->type != EV_MOTION) && ((m->type != EV_IMPACT) || (IMU_IMPACT_STOPS != 0))) {
 			if (!q_push(&s->vcq, SRC_IMU, m->type, m->p1, m->p2, s->t_ms)) {
-				s->fault_flags |= FLT_QUEUE_OVF;
+				if (evt_is_safety(m->type)) {
+					s->fault_flags |= FLT_QUEUE_OVF;
+				} else if (m->type == EV_TERRAIN) {
+					s->terrain_resend = true;
+				} else {
+					/* dropped and counted */
+				}
 			}
 		}
 		(void)q_push(&s->telq, SRC_IMU, m->type, m->p1, m->p2, s->t_ms);
@@ -472,7 +573,7 @@ static void imu_step(SIM *s)
 			/* motion classes are not traced */
 		}
 	}
-	s->health[HEALTH_IMU] = s->t_ms | 1U;
+	s->health[HEALTH_IMU] = (uint16_t)(s->t_ms | 1U);
 }
 
 /* ---- obstacle scan (mirrors task_scan.c and the HC-SR04 driver) -------------------- */
@@ -485,7 +586,7 @@ static void scan_step(SIM *s)
 	memset(&in, 0, sizeof(in));
 	in.now_ms = s->t_ms;
 	for (i = 0; i < s->sq_n; i++) {
-		in.req = s->sq[i];			/* only the newest one counts */
+		scan_req_unpack(&s->sq[i], &in.req);	/* only the newest one counts */
 		in.have_req = true;
 	}
 	s->sq_n = 0;
@@ -504,8 +605,25 @@ static void scan_step(SIM *s)
 		in.echo = SCAN_ECHO_NONE;
 	}
 	in.echo_high = (int32_t)(s->echo_high_until_us - s->t_us) > 0;
+	in.speed_mm_s = s->snap.speed_mm_s;
+	in.stop_decel_mm_s2 = s->snap.stop_decel_mm_s2;
+	if (in.echo == SCAN_ECHO_FAR) {			/* task_scan.c: status bit */
+		s->fault_flags |= FLT_NO_ECHO;
+	} else if (in.echo == SCAN_ECHO_DONE) {
+		s->fault_flags &= ~FLT_NO_ECHO;
+	} else {
+		/* unchanged */
+	}
 
 	scan_core_step(&s->sc, &in, &out);
+	if (out.stop_motors) {				/* task_scan.c: motion_stop() */
+		if ((s->stop_flags & MC_CMD_STOP) == 0U) {
+			s->stop_req_us = s->t_us;
+		}
+		s->stop_flags |= MC_CMD_STOP;
+		motion_step(s, false);
+		trace(s, "OS stop at %s%d mm %d", "", s->sc.last_range, 0);
+	}
 	s->car.servo_cmd = out.servo_deg;
 	if (out.trigger) {
 		if (in.echo_high || s->ping_in_flight) {
@@ -526,7 +644,10 @@ static void scan_step(SIM *s)
 		s->fault_flags |= FLT_SCAN;
 	}
 	if (out.profile_ready) {
-		s->prof = s->sc.profile;
+		OS_PROFILE_PK pk;
+
+		os_profile_pack(&s->sc.profile, &pk);	/* readers see the packed copy */
+		os_profile_unpack(&pk, &s->prof);
 		(void)q_push(&s->telq, SRC_SCAN, EV_PROFILE_DATA, 0, 0, s->t_ms);
 		if (s->verbose) {
 			printf("%7.3f  PROFILE valid %d x %d..%d closest %d at %d clear L %d R %d unk L %u R %u\n",
@@ -535,8 +656,8 @@ static void scan_step(SIM *s)
 			       s->prof.right_clear_mm, s->prof.unknown_left, s->prof.unknown_right);
 		}
 	}
-	push_list_vc(s, SRC_SCAN, &out.ev);
-	s->health[HEALTH_SCAN] = s->t_ms | 1U;
+	(void)push_list_vc(s, SRC_SCAN, &out.ev);
+	s->health[HEALTH_SCAN] = (uint16_t)(s->t_ms | 1U);
 }
 
 /* ---- vehicle controller (mirrors task_vc.c) ------------------------------------------ */
@@ -552,7 +673,7 @@ static bool sim_motion_send(SIM *s, uint8_t type, int32_t a, int32_t b, int32_t 
 	if (!mc_cmd_valid(&cmd, MC_MAX_SPEED) || (s->mq_n >= MCQ_CAP)) {
 		return false;
 	}
-	s->mq[s->mq_n++] = cmd;
+	mc_cmd_pack(&cmd, &s->mq[s->mq_n++]);
 	return true;
 }
 
@@ -568,7 +689,9 @@ static void run_actions(SIM *s, const VC_ACTIONS *act)
 			if (getenv("SIM_HOLD") != NULL) {
 				trace(s, "hold %s%d %d", "", a->a, a->b);
 			}
-			(void)sim_motion_send(s, MC_CMD_SPEED, a->a, a->b, 0);
+			if (sim_motion_send(s, MC_CMD_SPEED, a->a, a->b, a->c)) {
+				motion_step(s, false);	/* motion_hold_speed() wakes the task */
+			}
 			break;
 		case VA_MOVE:
 			trace(s, "MOVE %s%d mm id %d", "", a->a, a->c);
@@ -579,14 +702,17 @@ static void run_actions(SIM *s, const VC_ACTIONS *act)
 			break;
 		case VA_TURN:
 			trace(s, "TURN %s%d deg id %d", "", a->a, a->c);
+			s->turns++;
 			if (!sim_motion_send(s, MC_CMD_TURN, a->a, 0, a->c)) {
 				s->queue_errors++;
 				s->fault_flags |= FLT_QUEUE_OVF;
 			}
 			break;
 		case VA_STOP:
+			if ((s->stop_flags & MC_CMD_STOP) == 0U) {
+				s->stop_req_us = s->t_us;	/* the first request is timed */
+			}
 			s->stop_flags |= MC_CMD_STOP;
-			s->stop_req_us = s->t_us;
 			motion_step(s, false);		/* tk_wup_tsk: acts at once */
 			break;
 		case VA_CLEAR_STOP:
@@ -594,9 +720,12 @@ static void run_actions(SIM *s, const VC_ACTIONS *act)
 			break;
 		case VA_SCAN:
 			if (s->sq_n < SCQ_CAP) {
-				s->sq[s->sq_n].mode = (uint32_t)a->a;
-				s->sq[s->sq_n].stop_mm = a->b;
-				s->sq[s->sq_n].id = a->c;
+				SCAN_REQ req;
+
+				req.mode = (uint32_t)a->a;
+				req.stop_mm = a->b;
+				req.id = a->c;
+				scan_req_pack(&req, &s->sq[s->sq_n]);
 				s->sq_n++;
 			} else {
 				s->queue_errors++;
@@ -629,7 +758,7 @@ static void run_actions(SIM *s, const VC_ACTIONS *act)
 
 static void vc_drain(SIM *s)
 {
-	APP_MSG		m;
+	APP_EVT		m;
 	VC_ACTIONS	act;
 
 	while (q_pop(&s->vcq, &m)) {
@@ -652,13 +781,13 @@ static const MC_PARAMS k_mc = {
 	MC_COUNTS_PER_M, MC_COUNTS_PER_90DEG, MC_TRACK_MM, MC_KFF_X1000, MC_DEADBAND,
 	MC_KP_X1000, MC_KI_X1000, MC_MAX_SPEED, MC_MIN_SPEED, MC_ACCEL, MC_TURN_SPEED,
 	MC_K_STRAIGHT, MC_SETTLE_SPEED, MC_STALL_DUTY, MC_STALL_SPEED, MC_STALL_TICKS,
-	MC_TIMEOUT_MARGIN_MS, MC_SPEED_WINDOW
+	MC_TIMEOUT_MARGIN_MS, MC_SPEED_WINDOW, MC_DUTY_RISE, MC_STOP_COAST, MC_STEER_PM_MM
 };
-static const LC_PARAMS k_lc = {LB_JUNCTION_MS, LB_JUNCTION_MM, LB_T_LOST_MS};
+static const LC_PARAMS k_lc = {LB_JUNCTION_MS, LB_JUNCTION_MM, LB_LOST_MM};
 static const BC_PARAMS k_bc = {LB_T_MIN_US, LB_T_END_MIN_MS * 1000U, LB_T_END_FACTOR, (uint8_t)LB_BAR_LEVEL};
 static const LS_PARAMS k_ls = {
-	LS_D_MIN, LS_D_RATE, LS_D_MAX, LS_D_BIAS, LS_D_SEARCH, LS_T_ESCAPE_MS, LS_T_DRIFT_MS, LB_T_LOST_MS,
-	LS_SLOW_PCT, LS_START_SIDE
+	LS_D_MIN, LS_D_RATE, LS_RATE_MM, LS_D_MAX, LS_D_BIAS, LS_D_SEARCH, LS_ESCAPE_MM, LS_DRIFT_MM,
+	LB_LOST_MM, LS_SLOW_PCT, LS_START_SIDE
 };
 static const IMU_PARAMS k_imu = {
 	IMU_AXIS_FWD, IMU_SIGN_FWD, IMU_AXIS_UP, IMU_SIGN_UP, IMU_AXIS_LAT, IMU_SIGN_LAT,
@@ -672,7 +801,7 @@ static const SM_PARAMS k_sm = {
 	SM_RESTART_POLLS
 };
 static const SCAN_PARAMS k_sc = {
-	OS_STOP_MM, OS_SLOW_MM, OS_SLOW_HYST_MM, OS_CONFIRM, OS_GAP_MS, OS_SETTLE_BASE_MS,
+	OS_STOP_MM, OS_SLOW_EXTRA_MM, OS_SLOW_HYST_MM, OS_DECEL_GUESS, OS_CONFIRM, OS_GAP_MS, OS_SETTLE_BASE_MS,
 	OS_SETTLE_MS_PER_DEG, OS_RETRIES, OS_R_MAX_MM, OS_CORRIDOR_MM, OS_COARSE_STEP, OS_FINE_STEP,
 	OS_FINE_MARGIN, OS_MISSING_LIMIT, OS_PROFILE_MAX_MS
 };
@@ -682,8 +811,8 @@ static const VC_PARAMS k_vc = {
 	VC_REAR_CLEAR_MM, VC_OBST_DEPTH_MM, VC_LINE_HALF_MM, VC_STOP_MM, VC_BYPASS_STOP_MM,
 	VC_BYPASS_DEG, VC_BACK_MM, VC_N_RETRY, VC_TIE_MM, VC_PREF_SIDE, VC_FIND_EXTRA_MM,
 	VC_ALIGN_EXTRA_MM, VC_D_EXEC_MM, VC_JUNCTION_MUTE_MM, VC_CROSS_MM, VC_ACQUIRE_MM, VC_T_STARTUP_MS,
-	VC_T_ACK_MS, VC_T_SCAN_MS, VC_T_SEARCH_MS, VC_T_EXEC_MS, VC_T_BYPASS_MS,
-	VC_HUMP_GRACE_MS, VC_HOLD_REFRESH_MS
+	VC_T_ACK_MS, VC_T_SCAN_MS, MC_TRACK_MM, MC_TURN_SPEED, MC_ACCEL, VC_STEP_MARGIN_MS,
+	VC_HUMP_GRACE_MM, VC_HOLD_REFRESH_MS, VC_SEARCH_STEP_DEG, VC_SEARCH_MAX_DEG
 };
 
 static void sim_init(SIM *s, const char *name, double x, double y, double th_deg)
@@ -694,6 +823,7 @@ static void sim_init(SIM *s, const char *name, double x, double y, double th_deg
 	memset(s, 0, sizeof(*s));
 	srand(g_seed);
 	s->name = name;
+	s->rest_gap = -1.0;
 	w_init(&s->w);
 	car_init(&s->car, x, y, th_deg);
 	s->vcq.cap = VCQ_CAP;
@@ -704,9 +834,12 @@ static void sim_init(SIM *s, const char *name, double x, double y, double th_deg
 	for (i = 0; i < (int)CMD_NPARAMS; i++) {
 		s->params[i] = -1;
 	}
+	mc_enc_init(&s->enc, enc_word(s));
+	cnt[0] = s->enc.pos[0];
+	cnt[1] = s->enc.pos[1];
 	mc_core_init(&s->mc, &k_mc, cnt);
 	s->was_stopped = true;
-	lc_init(&s->lc, &k_lc, 0U);
+	lc_init(&s->lc, &k_lc, 0);
 	bc_init(&s->bc, &k_bc);
 	imu_core_init(&s->imu, &k_imu);
 	sm_init(&s->sm, &k_sm);
@@ -739,8 +872,7 @@ static void sim_ms(SIM *s)
 		s->t_us += 100U;
 		lvl = car_sensor_black(&s->car, &s->w, CAR_LINE_FWD, CAR_BC_LEFT);
 		if ((lvl != s->bc_level) && (s->edge_n < EDGE_CAP)) {
-			s->edge_t[s->edge_n] = s->t_us;
-			s->edge_l[s->edge_n] = lvl ? 1U : 0U;
+			s->edge[s->edge_n] = (s->t_us & BC_EDGE_TIME_SIM) | (lvl ? 0x80000000U : 0U);
 			s->edge_n++;
 		}
 		s->bc_level = lvl;
@@ -762,6 +894,8 @@ static void sim_ms(SIM *s)
 				command_text(s, e->text);
 			} else if (e->kind == SC_BUTTON) {
 				s->btn[(e->a == 20) ? 0 : 1] = 0;
+			} else if (e->kind == SC_IMU_TILT) {
+				s->car.imu_extra_deg = e->a / 10.0;
 			} else {
 				s->imu_fail = (e->a != 0);
 			}
@@ -789,7 +923,7 @@ static void sim_ms(SIM *s)
 
 		vc_tick(&s->vc, s->t_ms, s->snap.odo_mm, ready, &act);
 		run_actions(s, &act);
-		s->health[HEALTH_VC] = s->t_ms | 1U;
+		s->health[HEALTH_VC] = (uint16_t)(s->t_ms | 1U);
 		vc_drain(s);
 	}
 	safety_flags(s);
@@ -826,6 +960,18 @@ static void sim_run(SIM *s, uint32_t until_ms)
 	telemetry_step(s, false, false);
 }
 
+/* Run until the car has driven `mm` along its real path, or until cap_ms
+   if it never gets that far (stopped, halted).  Scenarios that check WHERE
+   the car ends up use this, so they test the same behaviour at any speed
+   setting: a slower car just takes longer to get there. */
+static void sim_run_dist(SIM *s, double mm, uint32_t cap_ms)
+{
+	while ((s->car.odo < mm) && (s->t_ms < cap_ms)) {
+		sim_ms(s);
+	}
+	telemetry_step(s, false, false);
+}
+
 /* ---- checks -------------------------------------------------------------------------------- */
 static int g_fail;
 static int g_checks;
@@ -842,15 +988,15 @@ static void check(SIM *s, bool ok, const char *what)
 static void report(SIM *s)
 {
 	printf("  %-16s end: state %s, x %.0f y %.0f th %.0f, odo %d mm, follow dev max %.1f mean %.1f, "
-	       "humps %d, barcodes %d (bad %d), json max %d\n",
+	       "humps %d, barcodes %d (bad %d), largest record %d B\n",
 	       s->name, vc_state_name(s->vc.state), s->car.x, s->car.y, s->car.th * 180.0 / PI,
 	       s->snap.odo_mm, s->max_dev_follow, (s->follow_ms > 0U) ? (s->sum_dev / s->follow_ms) : 0.0,
-	       s->nhumps, s->nbarcodes, s->bad_reads, s->json_max);
+	       s->nhumps, s->nbarcodes, s->bad_reads, s->msg_max);
 }
 
 static bool common_ok(SIM *s)
 {
-	return (s->json_fail == 0) && (s->vcq.drops == 0) && (s->queue_errors == 0);
+	return (s->msg_fail == 0) && (s->vcq.drops == 0) && (s->queue_errors == 0);
 }
 
 static double heading_deg(const SIM *s)
@@ -897,15 +1043,87 @@ static void sc_oval(bool verbose, const char *name, double r, bool cw, const cha
 	script(s, 1500U, SC_CMD, 0, "7 START");
 	sim_run(s, 40000U);
 	report(s);
+	printf("  %-16s smoothness: largest sudden change of a wheel's target %d mm/s, outside wheel at most %d mm/s above base\n",
+	       s->name, s->max_step, s->max_over);
 	check(s, (s->states_seen & (1U << VC_SEARCH)) == 0U, "never lost the line");
 	check(s, s->max_dev_follow < 25.0, "axle within 25 mm of the line");
-	check(s, s->snap.odo_mm > (s->vc.p.base_speed * 24), "average speed at least 65 % of the base speed");
+	{
+		/* the largest change mc_core may make in one tick (steer_room) */
+		int32_t b = s->vc.p.base_speed;
+		int32_t room = ((b * MC_STEER_PM_MM) / 10) * (b * MC_PERIOD_MS) / 100000;
+
+		check(s, (s->max_over <= 0) && (s->max_step <= room + 1),
+		      "smooth wheels: no wheel above base_speed, no sudden jump bigger than MC_STEER_PM_MM allows");
+	}
+	/* 55 %: since V12 the outside wheel never runs faster than the speed
+	   asked for (before, every steering change briefly over-sped it, which
+	   inflated the average at 300 mm/s to 73 %); at 140 mm/s the loop
+	   average is about 87 % */
+	check(s, s->snap.odo_mm > (s->vc.p.base_speed * 21), "average speed at least 55 % of the base speed");
 	check(s, s->vc.state == VC_FOLLOW, "still following at the end");
-	check(s, common_ok(s), "no queue overflow, every message <= 200 bytes");
+	check(s, common_ok(s), "no queue overflow, every MQTT record fits (<= 34 bytes)");
 	free(s);
 }
 
-static void sc_barcode(bool verbose, const char *name, char c, int expect, bool backwards)
+/* The car on a loop with a wrong IMU "level".
+   cal_tilt: the car is held tilted while it calibrates at power-up, then
+	     put down level and left in READY for 2 s before START (as on
+	     the real car, 23 Oct: 4.4 degrees at rest).
+   run_tilt: the IMU reading tilts during the run (a knocked board): the
+	     IMU believes the car is climbing.  The line must still be
+	     followed: a pitch reading alone must never blind the car. */
+static void sc_tilt(bool verbose, const char *name, int cal_tilt, int run_tilt)
+{
+	SIM *s = calloc(1, sizeof(SIM));
+
+	sim_init(s, name, 0.0, 0.0, 0.0);
+	s->verbose = verbose;
+	oval(s, 300.0, false);
+	s->car.imu_extra_deg = cal_tilt / 10.0;
+	script(s, 1200U, SC_IMU_TILT, 0, NULL);		/* put down level */
+	script(s, 3200U, SC_CMD, 0, "7 START");
+	if (run_tilt != 0) {
+		script(s, 6000U, SC_IMU_TILT, run_tilt, NULL);
+	}
+	sim_run(s, 42000U);
+	report(s);
+	if (cal_tilt != 0) {
+		check(s, (s->slopes == 0) && (s->nhumps == 0),
+		      "tilted at power-up, level in READY: re-learned level, no false slope or hump");
+	} else {
+		check(s, s->slopes > 0, "the tilted IMU does report a (false) slope");
+	}
+	check(s, (s->states_seen & (1U << VC_SEARCH)) == 0U, "never lost the line");
+	check(s, s->max_dev_follow < 25.0, "axle within 25 mm of the line, curves included");
+	check(s, s->vc.state == VC_FOLLOW, "still following at the end");
+	free(s);
+}
+
+/* Line following across the 65.536 s wrap of the 16-bit ms times:
+   READY for 60 s, then 25 s of following. */
+static void sc_wrap_oval(bool verbose)
+{
+	SIM *s = calloc(1, sizeof(SIM));
+
+	sim_init(s, "wrap_oval", 0.0, 0.0, 0.0);
+	s->verbose = verbose;
+	oval(s, 300.0, false);
+	script(s, 60000U, SC_CMD, 0, "7 START");
+	sim_run(s, 85000U);
+	report(s);
+	check(s, (s->states_seen & (1U << VC_SEARCH)) == 0U, "never lost the line across the wrap");
+	check(s, (s->fault_flags & FLT_ALL) == 0U, "no fault latched (no false health timeout)");
+	check(s, s->snap.steer_lat_max_ms < 30, "steering latency log not corrupted by the wrap");
+	check(s, s->vc.state == VC_FOLLOW, "still following at the end");
+	check(s, common_ok(s), "no queue overflow, every MQTT record fits (<= 34 bytes)");
+	free(s);
+}
+
+/* t0: extra time in READY before START.  62 s puts the barcode read and
+   the turn across the 65.536 s wrap of every 16-bit ms time (APP_MSG
+   t_ms, health stamps, the motion command's line time). */
+static void sc_barcode(bool verbose, const char *name, char c, int expect, bool backwards, const char *set,
+		       uint32_t t0)
 {
 	SIM *s = calloc(1, sizeof(SIM));
 	double hd;
@@ -919,8 +1137,11 @@ static void sc_barcode(bool verbose, const char *name, char c, int expect, bool 
 		w_barcode(&s->w, 300.0, 0.0, 0.0, c, false);
 	}
 	w_line(&s->w, 900.0, -1500.0, 900.0, 1500.0);		/* a + junction */
-	script(s, 1500U, SC_CMD, 0, "1 START");
-	sim_run(s, (expect == LB_CMD_U_TURN) ? 12500U : 14000U);
+	if (set != NULL) {
+		script(s, t0 + 1400U, SC_CMD, 0, set);
+	}
+	script(s, t0 + 1500U, SC_CMD, 0, "7 START");
+	sim_run_dist(s, 1700.0, t0 + 60000U);	/* past the junction, well before a line end */
 	report(s);
 	hd = heading_deg(s);
 	check(s, (s->nbarcodes >= 1) && (s->barcodes[0] == c), "barcode decoded at speed");
@@ -945,13 +1166,13 @@ static void sc_barcode(bool verbose, const char *name, char c, int expect, bool 
 		      "no command: straight on");
 		break;
 	}
-	check(s, (s->states_seen & (1U << VC_SAFE_STOP)) == 0U, "no Safe Stop");
-	check(s, common_ok(s), "no queue overflow, every message <= 200 bytes");
+	check(s, (s->states_seen & ((1U << VC_SAFE_STOP) | (1U << VC_HALTED))) == 0U, "no Safe Stop");
+	check(s, common_ok(s), "no queue overflow, every MQTT record fits (<= 34 bytes)");
 	free(s);
 }
 
 static void sc_obstacle(bool verbose, const char *name, double y1, double y2, bool wall_left,
-			int expect_side)
+			int expect_side, const char *set)
 {
 	SIM *s = calloc(1, sizeof(SIM));
 
@@ -962,10 +1183,17 @@ static void sc_obstacle(bool verbose, const char *name, double y1, double y2, bo
 	if (wall_left) {
 		w_box(&s->w, 800.0, 200.0, 1400.0, 220.0, true);
 	}
-	script(s, 1500U, SC_CMD, 0, "1 START");
-	sim_run(s, 30000U);
+	if (set != NULL) {
+		script(s, 1400U, SC_CMD, 0, set);
+	}
+	script(s, 1500U, SC_CMD, 0, "7 START");
+	sim_run_dist(s, 2600.0, 90000U);	/* round the obstacle and on along the line */
 	report(s);
+	printf("  %-16s came to rest %.0f mm from the obstacle (stop_mm %d) at base %d mm/s\n",
+	       s->name, s->rest_gap, s->vc.p.stop_mm, s->vc.p.base_speed);
 	check(s, s->car.crash_count == 0, "no collision");
+	check(s, (s->rest_gap > 0.0) && (fabs(s->rest_gap - s->vc.p.stop_mm) <= 40.0),
+	      "came to rest about stop_mm from the obstacle (speed-aware stop)");
 	check(s, s->nav[NAV_BYPASS] == 1, "one bypass");
 	check(s, (expect_side == 0) || (s->nav[NAV_BYPASS] == 0) ||
 	      ((expect_side < 0) ? (s->nav_last[NAV_BYPASS] < 0) : (s->nav_last[NAV_BYPASS] > 0)),
@@ -975,21 +1203,24 @@ static void sc_obstacle(bool verbose, const char *name, double y1, double y2, bo
 	check(s, (s->vc.state == VC_FOLLOW) && (s->car.x > 2000.0) && (fabs(s->car.y) < 30.0),
 	      "following the original line past the obstacle");
 	check(s, s->max_dev_all < 450.0, "detour stays within 450 mm of the line");
-	check(s, common_ok(s), "no queue overflow, every message <= 200 bytes");
+	check(s, common_ok(s), "no queue overflow, every MQTT record fits (<= 34 bytes)");
 	free(s);
 }
 
-static void sc_hump(bool verbose)
+static void sc_hump(bool verbose, const char *name, const char *set)
 {
 	SIM *s = calloc(1, sizeof(SIM));
 
-	sim_init(s, "hump", 0.0, 0.0, 0.0);
+	sim_init(s, name, 0.0, 0.0, 0.0);
 	s->verbose = verbose;
 	w_line(&s->w, -200.0, 0.0, 5000.0, 0.0);
 	w_hump(&s->w, 800.0, 150.0, 12.0);		/* short, lower */
 	w_hump(&s->w, 2000.0, 400.0, 25.0);		/* long, higher */
-	script(s, 1500U, SC_CMD, 0, "1 START");
-	sim_run(s, 25000U);
+	if (set != NULL) {
+		script(s, 1400U, SC_CMD, 0, set);
+	}
+	script(s, 1500U, SC_CMD, 0, "7 START");
+	sim_run_dist(s, 3300.0, 90000U);	/* over both humps */
 	report(s);
 	if (s->nhumps >= 2) {
 		printf("  %-16s hump estimates %d mm (true 12) and %d mm (true 25), highest %d\n",
@@ -999,10 +1230,10 @@ static void sc_hump(bool verbose)
 	check(s, (s->nhumps >= 1) && (s->humps[0] >= 8) && (s->humps[0] <= 16), "first hump 12 mm +/- 4");
 	check(s, (s->nhumps >= 2) && (s->humps[1] >= 19) && (s->humps[1] <= 31), "second hump 25 mm +/- 6");
 	check(s, (s->imu.max_hump_mm >= 19) && (s->imu.max_hump_mm <= 31), "highest hump of the run");
-	check(s, (s->states_seen & ((1U << VC_SEARCH) | (1U << VC_SAFE_STOP))) == 0U,
+	check(s, (s->states_seen & ((1U << VC_SEARCH) | (1U << VC_SAFE_STOP) | (1U << VC_HALTED))) == 0U,
 	      "kept the line, no Safe Stop");
 	check(s, (s->vc.state == VC_FOLLOW) && (s->car.x > 3000.0), "still following after both humps");
-	check(s, common_ok(s), "no queue overflow, every message <= 200 bytes");
+	check(s, common_ok(s), "no queue overflow, every MQTT record fits (<= 34 bytes)");
 	free(s);
 }
 
@@ -1014,19 +1245,19 @@ static void sc_dead_end(bool verbose)
 	s->verbose = verbose;
 	w_line(&s->w, -200.0, 0.0, 700.0, 0.0);
 	script(s, 1500U, SC_CMD, 0, "1 START");
-	script(s, 20000U, SC_CMD, 0, "2 RESTART");
-	script(s, 21000U, SC_CMD, 0, "3 START");
-	sim_run(s, 19000U);
-	check(s, (s->vc.state == VC_SAFE_STOP) && (s->last_why == VC_WHY_SEARCH_FAILED),
-	      "search fails -> Safe Stop (search failed)");
-	check(s, (s->car.duty[0] == 0.0) && (s->car.duty[1] == 0.0) && s->sm.faulted,
-	      "motors off, fault latched");
-	sim_run(s, 20500U);
-	check(s, (s->vc.state == VC_READY) && !s->sm.faulted, "RESTART clears the fault -> READY");
-	sim_run(s, 21500U);
-	check(s, s->vc.state == VC_FOLLOW, "START runs again");
+	while ((s->vc.state != VC_HALTED) && (s->t_ms < 90000U)) {	/* at any speed */
+		sim_ms(s);
+	}
+	sim_run(s, s->t_ms + 500U);
+	check(s, (s->vc.state == VC_HALTED) && (s->last_why == VC_WHY_SEARCH_FAILED) && (s->turns == 2),
+	      "both search spins done (180 each side), then HALTED (line not found: a mission failure)");
+	check(s, (s->car.duty[0] == 0.0) && (s->car.duty[1] == 0.0) && !s->sm.faulted &&
+	      ((s->stop_flags & MC_CMD_STOP) != 0U), "motors stopped by CMD_STOP, no fault latched");
+	script(s, s->t_ms + 500U, SC_CMD, 0, "2 START");
+	sim_run(s, s->t_ms + 1000U);
+	check(s, s->vc.state == VC_FOLLOW, "START carries on (no RESTART needed)");
 	report(s);
-	check(s, common_ok(s), "no queue overflow, every message <= 200 bytes");
+	check(s, common_ok(s), "no queue overflow, every MQTT record fits (<= 34 bytes)");
 	free(s);
 }
 
@@ -1056,7 +1287,7 @@ static void sc_stop_start(bool verbose)
 	sim_run(s, 10000U);
 	check(s, (s->vc.state == VC_FINISHED) && (s->nav[NAV_FINISH] == 1), "FINISH and run summary");
 	report(s);
-	check(s, common_ok(s), "no queue overflow, every message <= 200 bytes");
+	check(s, common_ok(s), "no queue overflow, every MQTT record fits (<= 34 bytes)");
 	free(s);
 }
 
@@ -1087,16 +1318,19 @@ static void sc_imu_fault(bool verbose)
 	free(s);
 }
 
-static void sc_impact(bool verbose)
+static void sc_impact(bool verbose, const char *name, const char *set)
 {
 	SIM *s = calloc(1, sizeof(SIM));
 
-	sim_init(s, "impact", 0.0, 0.0, 0.0);
+	sim_init(s, name, 0.0, 0.0, 0.0);
 	s->verbose = verbose;
 	w_line(&s->w, -200.0, 0.0, 5000.0, 0.0);
 	w_box(&s->w, 1000.0, -60.0, 1100.0, 60.0, false);	/* the sonar cannot see it */
-	script(s, 1500U, SC_CMD, 0, "1 START");
-	sim_run(s, 12000U);
+	if (set != NULL) {
+		script(s, 1400U, SC_CMD, 0, set);
+	}
+	script(s, 1500U, SC_CMD, 0, "7 START");
+	sim_run_dist(s, 1500.0, 40000U);	/* it should never get this far */
 	report(s);
 	check(s, s->crash_ms != 0U, "the car hit the hidden obstacle");
 	check(s, (s->vc.state == VC_SAFE_STOP) &&
@@ -1108,16 +1342,19 @@ static void sc_impact(bool verbose)
 	free(s);
 }
 
-static void sc_gap(bool verbose)
+static void sc_gap(bool verbose, const char *name, const char *set)
 {
 	SIM *s = calloc(1, sizeof(SIM));
 
-	sim_init(s, "line_gap", 0.0, 0.0, 0.0);
+	sim_init(s, name, 0.0, 0.0, 0.0);
 	s->verbose = verbose;
 	w_line(&s->w, -200.0, 0.0, 900.0, 0.0);
 	w_line(&s->w, 960.0, 0.0, 3000.0, 0.0);		/* a 60 mm gap */
-	script(s, 1500U, SC_CMD, 0, "1 START");
-	sim_run(s, 14000U);
+	if (set != NULL) {
+		script(s, 1400U, SC_CMD, 0, set);
+	}
+	script(s, 1500U, SC_CMD, 0, "7 START");
+	sim_run_dist(s, 1800.0, 60000U);
 	report(s);
 	check(s, (s->states_seen & (1U << VC_SEARCH)) == 0U, "drove across a 60 mm gap");
 	check(s, (s->car.x > 1500.0) && (fabs(s->car.y) < 30.0), "following after the gap");
@@ -1134,7 +1371,14 @@ static const SCN k_scn[] = {
 	{"barcode_A", 10}, {"barcode_B", 11}, {"barcode_C", 12}, {"barcode_D", 13}, {"barcode_Z", 14}, {"barcode_A_back", 15},
 	{"obstacle_mid", 20}, {"obstacle_right", 21}, {"obstacle_wall", 22},
 	{"hump", 30}, {"dead_end", 31}, {"stop_start", 32}, {"imu_fault", 33}, {"impact", 34},
-	{"line_gap", 35}
+	{"line_gap", 35},
+	/* the same courses at other speeds: the outcome must not depend on it */
+	{"barcode_A_slow", 40}, {"barcode_B_fast", 41}, {"obstacle_slow", 42}, {"obstacle_fast", 43},
+	{"line_gap_slow", 44}, {"line_gap_fast", 45}, {"impact_slow", 46},
+	{"hump_slow", 47},
+	{"oval_tilt_cal", 48}, {"oval_tilt_run", 49},
+	/* across the 65.536 s wrap of the 16-bit times */
+	{"wrap_oval", 50}, {"wrap_barcode_B", 51}
 };
 
 static void run_one(int id, bool v)
@@ -1144,23 +1388,35 @@ static void run_one(int id, bool v)
 	case 2:  sc_oval(v, "oval_right", 300.0, true, NULL); break;
 	case 3:  sc_oval(v, "oval_tight", 200.0, false, NULL); break;
 	case 4:  sc_oval(v, "oval_fast", 300.0, false, "1 SET base_speed 300"); break;
-	case 5:  sc_oval(v, "oval_slow", 200.0, true, "1 SET base_speed 120"); break;
-	case 10: sc_barcode(v, "barcode_A", 'A', LB_CMD_TURN_LEFT, false); break;
-	case 11: sc_barcode(v, "barcode_B", 'B', LB_CMD_TURN_RIGHT, false); break;
-	case 12: sc_barcode(v, "barcode_C", 'C', LB_CMD_STRAIGHT, false); break;
-	case 13: sc_barcode(v, "barcode_D", 'D', LB_CMD_U_TURN, false); break;
-	case 14: sc_barcode(v, "barcode_Z", 'Z', LB_CMD_NONE, false);
+	case 5:  sc_oval(v, "oval_slow", 200.0, true, "1 SET base_speed 80"); break;
+	case 10: sc_barcode(v, "barcode_A", 'A', LB_CMD_TURN_LEFT, false, NULL, 0U); break;
+	case 11: sc_barcode(v, "barcode_B", 'B', LB_CMD_TURN_RIGHT, false, NULL, 0U); break;
+	case 12: sc_barcode(v, "barcode_C", 'C', LB_CMD_STRAIGHT, false, NULL, 0U); break;
+	case 13: sc_barcode(v, "barcode_D", 'D', LB_CMD_U_TURN, false, NULL, 0U); break;
+	case 14: sc_barcode(v, "barcode_Z", 'Z', LB_CMD_NONE, false, NULL, 0U);
 		break;
-	case 15: sc_barcode(v, "barcode_A_back", 'A', LB_CMD_TURN_LEFT, true); break;
-	case 20: sc_obstacle(v, "obstacle_mid", -60.0, 60.0, false, 0); break;
-	case 21: sc_obstacle(v, "obstacle_right", -100.0, 20.0, false, -1); break;
-	case 22: sc_obstacle(v, "obstacle_wall", -60.0, 60.0, true, 1); break;
-	case 30: sc_hump(v); break;
+	case 15: sc_barcode(v, "barcode_A_back", 'A', LB_CMD_TURN_LEFT, true, NULL, 0U); break;
+	case 20: sc_obstacle(v, "obstacle_mid", -60.0, 60.0, false, 0, NULL); break;
+	case 21: sc_obstacle(v, "obstacle_right", -100.0, 20.0, false, -1, NULL); break;
+	case 22: sc_obstacle(v, "obstacle_wall", -60.0, 60.0, true, 1, NULL); break;
+	case 30: sc_hump(v, "hump", NULL); break;
 	case 31: sc_dead_end(v); break;
 	case 32: sc_stop_start(v); break;
 	case 33: sc_imu_fault(v); break;
-	case 34: sc_impact(v); break;
-	case 35: sc_gap(v); break;
+	case 34: sc_impact(v, "impact", NULL); break;
+	case 35: sc_gap(v, "line_gap", NULL); break;
+	case 40: sc_barcode(v, "barcode_A_slow", 'A', LB_CMD_TURN_LEFT, false, "1 SET base_speed 80", 0U); break;
+	case 41: sc_barcode(v, "barcode_B_fast", 'B', LB_CMD_TURN_RIGHT, false, "1 SET base_speed 300", 0U); break;
+	case 42: sc_obstacle(v, "obstacle_slow", -60.0, 60.0, false, 0, "1 SET base_speed 80"); break;
+	case 43: sc_obstacle(v, "obstacle_fast", -60.0, 60.0, false, 0, "1 SET base_speed 300"); break;
+	case 44: sc_gap(v, "line_gap_slow", "1 SET base_speed 80"); break;
+	case 45: sc_gap(v, "line_gap_fast", "1 SET base_speed 300"); break;
+	case 46: sc_impact(v, "impact_slow", "1 SET base_speed 80"); break;
+	case 47: sc_hump(v, "hump_slow", "1 SET base_speed 80"); break;
+	case 48: sc_tilt(v, "oval_tilt_cal", 44, 0); break;
+	case 49: sc_tilt(v, "oval_tilt_run", 0, 50); break;
+	case 50: sc_wrap_oval(v); break;
+	case 51: sc_barcode(v, "wrap_barcode_B", 'B', LB_CMD_TURN_RIGHT, false, NULL, 62000U); break;
 	default: break;
 	}
 }

@@ -1,0 +1,175 @@
+# min-bit-v12 at 762f29f (Change Requirement 1), host unit tests
+[PASS] C39-01   all 43 characters decode forwards
+[PASS] C39-02   all 43 characters decode backwards, flagged reversed
+[PASS] C39-03   all decode with a 30 % speed change across the barcode
+[PASS] C39-04   wide/narrow ratio 2.25 still decodes
+[PASS] C39-05   a misread element is rejected, never a wrong character
+[PASS] C39-06   27 widths: bad count
+[PASS] C39-07   '*' and lower case cannot be encoded as data
+[PASS] C39-08   speed changing 3x between characters still decodes
+[PASS] C39-09   all elements the same width: rejected
+[PASS] BC-01    clean capture decodes; not before the quiet time
+[PASS] BC-02    a 100 us chatter pair inside a bar is removed
+[PASS] BC-03    an edge that leaves the level unchanged is ignored
+[PASS] BC-04    one bar (a line crossing) is ignored silently
+[PASS] BC-05    60 edges: not a barcode
+[PASS] BC-07    a barcode across the 31-bit time wrap decodes, widths unchanged
+[PASS] BC-08    bp_dt31: edge times are masked before and after subtracting
+[PASS] BC-09    line status word round-trips; counts stop at 255
+[PASS] BC-10    '-' (no barcode yet) fits the 6-bit character
+[PASS] BC-06    command table
+[PASS] LC-01    status sent once, then only on change
+[PASS] LC-02    both black while barely moving: no junction
+[PASS] LC-03    junction reported exactly once per black band
+[PASS] LC-05    standing still off the line: not lost (T_lost is travel)
+[PASS] LC-04    line lost after T_lost of travel, on the side last seen (right)
+[PASS] LS-01    left on black: steer left, harder the further it stays
+[PASS] LS-02    right on black: steer right
+[PASS] LS-03    both black: straight across
+[PASS] LS-04    both white just after the right sensor: lean gently right
+[PASS] LS-05    centred: the lean holds for drift_mm, then grows (doubled after 2 x drift_mm), full speed
+[PASS] LS-06    white past T_lost of travel: lost, on the right
+[PASS] LS-07    right sensor black a long way, then white: line went outside, slow and turn firmly right
+[PASS] LS-08    no wheel is asked for more than the base speed
+[PASS] LS-09    slower car: correction scales with the speed (same curvature), inside wheel never reverses
+[PASS] MC-01    500 mm move: DONE with its id, within 10 mm
+[PASS] MC-02    both wheels travel the same (straight)
+[PASS] MC-03    odometer and net distance agree
+[PASS] MC-04    left turn 90: wheels opposite, each about counts_per_90deg
+[PASS] MC-05    speed hold ramps up gently, then holds 200 mm/s
+[PASS] MC-06    CMD_STOP: duty 0 on the wake-up itself, queue flushed
+[PASS] MC-07    STOP_ACK once stopped; commands refused while stopped
+[PASS] MC-08    FAULT_STOP wins over everything
+[PASS] MC-09    both bits clear: back to Idle
+[PASS] MC-10    blocked wheels: stall fault, motors off
+[PASS] MC-11    own fault holds until FAULT_STOP has been seen and cleared
+[PASS] MC-12    encoder backwards: detected, not a runaway
+[PASS] MC-13    zero distance invalid
+[PASS] MC-14    unknown command type invalid
+[PASS] MC-15    tune: valid values used, unset (-1) and out-of-range ignored
+[PASS] MC-16    speed hold between ticks: starts at once (as a short ramp, MC_STEER_PM_MM), latency logged; the full command within 20 ticks
+[PASS] MC-17    STOP_ACK carries the stopping distance; stop latency logged
+[PASS] MC-18    smooth start: drive rises at most MC_DUTY_RISE per tick, speed still reaches 200 mm/s
+[PASS] MC-19    CMD_STOP: duty 0 at once, coast until stopped, then brake; FAULT_STOP brakes at once
+[PASS] MC-20    blocked while holding speed, hold refreshed every 200 ms: stall fault still raised
+[PASS] MC-21a   no stopping rate before the first stop
+[PASS] MC-21    after a stop from speed: stopping rate = speed^2 / (2 x stopping distance)
+[PASS] MC-21b   a stop from standing still leaves the learned rate unchanged
+[PASS] MC-22    coasting that does not slow the car switches to the brake; the stop still completes
+[PASS] PK-M01   MC_CMD_PK is 8 bytes (motion_cmd_q slot 12 B, was 20 B)
+[PASS] PK-M02   DISTANCE round-trips at +-10,000 mm, speed 1..400, id 1..255
+[PASS] PK-M03   TURN round-trips at +-360 deg, speed 0..400
+[PASS] PK-M04   SPEED round-trips at +-400; a line time with low 16 bits 0 is still 'present'
+[PASS] PK-M05   out-of-range command fields saturate, never wrap
+[PASS] PK-M06   snapshot (36 B) round-trips every field at its min / max
+[PASS] PK-M07   out-of-range snapshot fields saturate, never wrap
+[PASS] PK-M08   encoder halves cross the 16-bit wrap (start 65,500); 80,000 counts summed in 32 bits
+[PASS] PK-M09   mc_snap_odo() reads the same odometer as a full unpack (0, 2413, max, saturated)
+[PASS] IMU-01   atan2 within 0.07 degree all round (at 1000 mg resolution)
+[PASS] IMU-02   sine within 0.0003
+[PASS] IMU-03   integer square root exact
+[PASS] IMU-04   calibration finds the 1.5 degree mounting tilt
+[PASS] IMU-05   pitch reads level after calibration
+[PASS] IMU-06   braking jolt without travel is not a slope
+[PASS] IMU-07   climbing then level / descending reported
+[PASS] IMU-08   one hump, height 20 mm +/- 5
+[PASS] IMU-09   highest hump of the run kept
+[PASS] IMU-10   jolt plus a sudden speed drop: collision
+[PASS] IMU-11   jolt while the car keeps going: a bump, not a collision
+[PASS] IMU-12   60 deg/s: turning
+[PASS] IMU-13   no speed, no vibration: stationary
+[PASS] IMU-14   five failed reads in a row: IMU fault
+[PASS] IMU-15   calibrated tilted (reads -4.4 deg level): standing still in READY re-learns level (0 +/- 0.3)
+[PASS] IMU-16   not on a run (carried, put down): no slope, no hump reported
+[PASS] IMU-17   on a run, a real 6 degree slope is still reported (level is only re-learned in READY)
+[PASS] PK-I01   IMU status (3 words) round-trips at the field limits
+[PASS] PK-I02   pitch past +-81.9 deg and humps past 255 saturate, never wrap
+[PASS] SM-01    a one-sample press is ignored (debounce)
+[PASS] SM-02    START after two samples
+[PASS] SM-03    a silent task raises FLT_HEALTH
+[PASS] SM-04    ... once, not every poll
+[PASS] SM-05    START while faulted is a RESTART request
+[PASS] SM-06    health ages stay small across the 16-bit wrap (stamps from 65,000 ms)
+[PASS] SM-07    a stamp newer than 'now' is fresh; a task silent > 65.5 s stays silent
+[PASS] OP-01    centred box: never narrower than it is, closest point about right
+[PASS] OP-02    no echo either side: open, but counted as unknown
+[PASS] OP-03    the box in the path is the obstacle, the wall beside it limits the left gap
+[PASS] OP-04    a missing echo inside the box does not split it
+[PASS] OP-05    no readings: no profile (not a clear path)
+[PASS] SC-01    watch: pings at least 70 ms apart
+[PASS] SC-02    two close readings: one ALERT, not repeated
+[PASS] SC-08    WATCH with the stop flag: the ALERT also stops the car, once
+[PASS] SC-10    standing still: ALERT just inside stop_mm
+[PASS] SC-11    faster: ALERT earlier by the confirming pings + the stopping distance at that speed
+[PASS] SC-12    a car that has measured a harder stop starts its stop later (learned, not guessed)
+[PASS] SC-03    profile: box found 250 mm ahead
+[PASS] SC-04    coarse 30..150 and fine 5-degree steps around the box
+[PASS] SC-05    profile finished well within its time limit
+[PASS] SC-06    servo back to the front afterwards
+[PASS] SC-07    no response ten times in a row: sensor fault
+[PASS] SC-09    WATCH without the stop flag: ALERT, no stop
+[PASS] EVT-02   every event type round-trips p1 and p2 at their min and max (8 B, payload <= 32 bits)
+[PASS] EVT-03   every event type saturates values below the min or above the max, never wraps
+[PASS] EVT-04   fault mask keeps the 10 latching bits only; header fields and the 1-bit button round-trip
+[PASS] PK-S01   SCAN_REQ (4 B, 20 bits): stop 120 / 600 / 0 = default and id 255 round-trip
+[PASS] PK-S02   out-of-range stop distances saturate, never become 'default'
+[PASS] PK-S03   echo width -> 12-bit range; past 4,000 mm (~23.3 ms) is 4,095 = no echo, never 904 mm
+[PASS] PK-S04   OS_PROFILE (13 B, 97 bits) round-trips every field at its limits
+[PASS] PK-S05   profile fields saturate, never wrap
+[PASS] PK-S06   VC status: 14 states and 10 reasons in 4 bits each; counts saturate
+[PASS] PK-S07   Scan status in one word (30 bits): mode 2, range 12 (saturates), pings low 16
+[PASS] VC-01    START before the sensors are ready: refused
+[PASS] VC-02    START: release, watch ahead, drive
+[PASS] VC-03    barcode A, then a junction: drive the axle onto the junction
+[PASS] VC-04    a DONE with the wrong id is ignored
+[PASS] VC-05    then turn left 90
+[PASS] VC-06    then follow the new branch
+[PASS] VC-07    STOP: READY, motors stopped
+[PASS] VC-08    a fault: Safe Stop from any state
+[PASS] VC-09    START refused while faulted
+[PASS] VC-10    RESTART asks Safety Monitor to clear
+[PASS] VC-11    faults cleared: READY
+[PASS] VC-12    centred box: the preferred side
+[PASS] VC-13    box sticking out right: pass on the left (shorter)
+[PASS] VC-14    no room on the left: pass on the right
+[PASS] VC-15    equal detours: the side with fewer missing echoes
+[PASS] VC-16    box beside the path: continue
+[PASS] VC-17    no room either side: reverse
+[PASS] VC-18    still no room after the retries: HALTED (mission failure, no fault latched)
+[PASS] VC-19    nothing seen clearly: back off and look again
+[PASS] VC-20    no profile in time: scan once more, then HALTED
+[PASS] VC-21    state names
+[PASS] VC-22    START after HALTED carries on with the same run (no RESTART needed)
+[PASS] VC-23    WATCH asks Obstacle Scan to stop the car; not while passing a known obstacle, then again
+[PASS] VC-24    a steering hold carries the time of its line reading
+[PASS] VC-25    a spin with no DONE is stopped at 2 x its own expected time + margin, not a fixed time
+[PASS] VC-26    a slower spin gets proportionally longer: it is not cut short
+[PASS] VC-27    SET base_speed 80 caps the junction move at 80 mm/s, and its watchdog follows that speed
+[PASS] VC-30    line search sweeps 180 degrees each side (the whole circle), then HALTED
+[PASS] VC-28    on a hump, one sensor black and one white: still steers toward the line, at hump speed
+[PASS] VC-29    on a hump, both black (sensors may be lifted): straight on at hump speed
+[PASS] CMD-01   4-byte START
+[PASS] CMD-02   4-byte STOP
+[PASS] CMD-03   same sequence number refused
+[PASS] CMD-04   anything but 4 bytes refused
+[PASS] CMD-05   spare bits set: a layout we do not know
+[PASS] CMD-06   out of range
+[PASS] CMD-07   unknown parameter refused
+[PASS] CMD-08   SET dist_cal 980
+[PASS] CMD-09   SET refused while running
+[PASS] CMD-10   the largest value (ki_x1000 = 50,000) fits the 16-bit field
+[PASS] CMD-11   verb 0 refused
+[PASS] CMD-12   sequence 250..255, 0..10: every one new across the wrap
+[PASS] CMD-13   127 ahead is new; 128 ahead and 1 behind are repeats
+[PASS] TEL-01   telemetry: 182 bits = 23 B, every field read back (faults: 10 latched + NO_ECHO + WIFI_DOWN)
+[PASS] TEL-02   extreme values saturate into the same sizes; a record that does not fit is refused
+[PASS] TEL-03   status: 142 bits = 18 B; the link state is only the WIFI_DOWN bit; the outage length is reported
+[PASS] TEL-04   STOP_ACK is not published as an event
+[PASS] TEL-05   event: 9 B, payload laid out exactly as APP_MSG
+[PASS] TEL-06   ack: 6 B (seq, accepted, error)
+[PASS] TEL-07   profile: 17 B (the 13-byte OS_PROFILE_PK behind the header)
+[PASS] TEL-08   summary: 16 B
+[PASS] TEL-09   timing: 269 bits in 34 B, the largest record (NET_PAYLOAD_MAX)
+[PASS] EVT-01   queue policy: safety events must arrive, the rest may be dropped and counted
+
+UNIT: 172 checks, 0 failed

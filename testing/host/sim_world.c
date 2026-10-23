@@ -26,6 +26,7 @@ double g_right_eff = 0.94;
 #define KFF_TRUE	g_kff_true
 #define TAU_S		0.060	/* motor time constant */
 #define TAU_BRAKE_S	0.025
+#define TAU_COAST_S	0.120	/* free-wheeling gear motor: friction stops it */
 #define RIGHT_EFF	g_right_eff	/* right motor 6 % weaker */
 #define GRAV_LOAD	700.0	/* mm/s lost per unit sin(pitch) when climbing */
 #define SERVO_DEG_S	400.0	/* SG90: about 0.15 s per 60 degrees */
@@ -278,7 +279,7 @@ void car_step(CAR *c, const WORLD *w, double dt)
 		double d = c->duty[i];
 
 		if (d == 0.0) {
-			c->v[i] += (0.0 - c->v[i]) * dt / TAU_BRAKE_S;
+			c->v[i] += (0.0 - c->v[i]) * dt / (c->coast ? TAU_COAST_S : TAU_BRAKE_S);
 		} else {
 			double mag = (fabs(d) - DB_TRUE) / KFF_TRUE;
 			double vss;
@@ -428,7 +429,7 @@ void imu_read(const CAR *c, double noise_mg, int32_t a[3])
 	double	f = (G_MM_S2 * sin(c->pitch) + c->a_long) / G_MM_S2 * 1000.0;
 	double	u = cos(c->pitch) * 1000.0;
 	double	l = (vm * om) / G_MM_S2 * 1000.0;
-	double	b = IMU_TILT_DEG * PI / 180.0;
+	double	b = (IMU_TILT_DEG + c->imu_extra_deg) * PI / 180.0;
 	double	fs, us;
 
 	if (c->impact_ms > 0.0) {

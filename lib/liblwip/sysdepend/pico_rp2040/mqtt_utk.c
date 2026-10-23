@@ -60,7 +60,9 @@ extern void		net_bridge_dropped(void);
 
 #define MQTT_UTK_BRIDGE_POLL_MS	20	/* look for outgoing telemetry this often */
 #define MQTT_UTK_BRIDGE_BURST	4	/* at most this many publishes per look */
-#define MQTT_UTK_BRIDGE_MAX	200	/* largest payload (lwIP output buffer: 256) */
+#define MQTT_UTK_BRIDGE_MAX	34	/* the largest binary record, NET_PAYLOAD_MAX
+					   (subsystem1.h): net_bridge_take() refuses a
+					   smaller buffer; lwIP output buffer: 256 */
 
 static void bridge_timeout(void *arg);
 
@@ -99,19 +101,21 @@ static void incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t flags)
 
 	for(i = 0; i < len; i++) {
 		if(rx_len < (MQTT_UTK_RX_DATA_MAX - 1)) {
-			/* The console is a terminal -- keep raw bytes from a
-			 * payload this demo did not publish from scrambling it. */
-			UB c = data[i];
-			rx_data[rx_len++] = (c >= 0x20 && c < 0x7f)? c: '.';
+			/* Raw bytes: commands are binary (4 B, see
+			 * app_program/subsystem1/cmd_parse.h), so nothing may be
+			 * replaced; the console gets them as hex below. */
+			rx_data[rx_len++] = data[i];
 		} else {
 			rx_truncated = 1;
 		}
 	}
 
 	if((flags & MQTT_DATA_FLAG_LAST) != 0) {
-		rx_data[rx_len] = '\0';
-		tm_printf((UB*)"mqtt: RX [%s] \"%s\"%s\n", rx_topic, rx_data,
-			  rx_truncated? " (truncated)": "");
+		tm_printf((UB*)"mqtt: RX [%s] %u bytes:", rx_topic, (UINT)rx_len);
+		for(i = 0; (i < rx_len) && (i < 16); i++) {
+			tm_printf((UB*)" %02x", (UINT)rx_data[i]);
+		}
+		tm_printf((UB*)"%s\n", rx_truncated? " (truncated)": "");
 		if(topic_equal(rx_topic, net_bridge_cmd_topic())) {
 			if(rx_truncated) {
 				net_bridge_dropped();	/* too long to be a command */
@@ -150,18 +154,22 @@ static void publish_done_cb(void *arg, err_t result)
 	}
 }
 
+/* The heartbeat is binary like every other message (minimum-bit data):
+ * a 16-bit count, little-endian, 2 bytes (it wraps after 91 h at one
+ * every 5 s; only ever compared for "changed"). */
 static void heartbeat_timeout(void *arg)
 {
-	static unsigned int	count = 0;
-	UB			payload[48];
-	int			len;
+	static u16_t	count = 0;
+	u8_t		payload[2];
 
 	(void)arg;
 
 	if(mqtt_client_is_connected(client)) {
-		len = tm_sprintf(payload, (const UB*)"hb %u", count++);
-		tm_printf((UB*)"mqtt: TX [" MQTT_TOPIC "] \"%s\"\n", payload);
-		(void)mqtt_publish(client, MQTT_TOPIC, payload, (u16_t)len,
+		payload[0] = (u8_t)(count & 0xFFu);
+		payload[1] = (u8_t)(count >> 8);
+		tm_printf((UB*)"mqtt: TX [" MQTT_TOPIC "] hb %u (2 B)\n", (UINT)count);
+		count++;
+		(void)mqtt_publish(client, MQTT_TOPIC, payload, 2u,
 				   0 /* qos */, 0 /* retain */,
 				   publish_done_cb, NULL);
 	}

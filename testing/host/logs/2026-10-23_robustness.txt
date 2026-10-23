@@ -1,0 +1,35 @@
+# run 1 (V11 before the hump/level change): 12 cars
+100 215 1.51 135 1.90 0.93 SIMULATION: 140 checks, 0 failed
+101 221 1.44 132 1.89 0.92 SIMULATION: 140 checks, 0 failed
+102 180 1.46 130 2.08 0.87 SIMULATION: 140 checks, 0 failed
+103 201 1.84 141 2.02 0.91 SIMULATION: 140 checks, 0 failed
+104 307 1.43 139 1.95 0.87 SIMULATION: 140 checks, 0 failed
+105 186 1.62 138 1.92 0.94 SIMULATION: 140 checks, 0 failed
+106 259 1.66 133 1.90 0.86 SIMULATION: 140 checks, 0 failed
+107 199 1.88 131 1.96 0.94 SIMULATION: 140 checks, 0 failed
+108 233 1.61 138 2.05 0.89 SIMULATION: 140 checks, 0 failed
+109 250 1.77 140 2.06 0.89 SIMULATION: 140 checks, 0 failed
+110 307 1.48 130 2.06 0.87 SIMULATION: 140 checks, 0 failed
+111 238 1.43 135 2.06 0.94 SIMULATION: 140 checks, 0 failed
+TOTAL: 12 cars, 12 with 0 failed checks
+
+# run 2 (V11, 148 checks): 6 cars
+100 215 1.51 135 1.90 0.93 SIMULATION: 148 checks, 0 failed
+101 221 1.44 132 1.89 0.92 SIMULATION: 148 checks, 0 failed
+102 180 1.46 130 2.08 0.87 SIMULATION: 148 checks, 0 failed
+103 201 1.84 141 2.02 0.91 SIMULATION: 148 checks, 0 failed
+104 307 1.43 139 1.95 0.87 SIMULATION: 148 checks, 0 failed
+105 186 1.62 138 1.92 0.94 SIMULATION: 148 checks, 0 failed
+TOTAL: 6 cars, 6 with 0 failed checks
+
+# run 3 (V12: 140 mm/s, smooth steering MC_STEER_PM_MM 80, 153 checks): 6 cars
+100 215 1.51 135 1.90 0.93 SIMULATION: 153 checks, 2 failed
+     [FAIL] line_gap_fast    drove across a 60 mm gap
+     [FAIL] line_gap_fast    following after the gap
+101 221 1.44 132 1.89 0.92 SIMULATION: 153 checks, 0 failed
+102 180 1.46 130 2.08 0.87 SIMULATION: 153 checks, 0 failed
+103 201 1.84 141 2.02 0.91 SIMULATION: 153 checks, 0 failed
+104 307 1.43 139 1.95 0.87 SIMULATION: 153 checks, 0 failed
+105 186 1.62 138 1.92 0.94 SIMULATION: 153 checks, 0 failed
+TOTAL: 6 cars, 5 with 0 failed checks
+# known: car 100 (weak encoders 1.90 counts/mm, kff 1.51) at 300 mm/s (2x the default) treats the 60 mm gap as 'line slipped outside' and turns away; it passes everything at the default 140 mm/s.

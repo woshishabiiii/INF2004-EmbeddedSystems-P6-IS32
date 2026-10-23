@@ -74,13 +74,17 @@ typedef struct {
 	uint32_t	fail_limit;	/* consecutive failed reads = IMU fault */
 } IMU_PARAMS;
 
-/* From Motion Control's snapshot */
+/* From Motion Control's snapshot, plus what the car is doing */
 typedef struct {
 	bool		valid;
 	int32_t		dist_mm;	/* net distance, signed */
 	int32_t		speed_mm_s;
 	int32_t		accel_mm_s2;
 	int32_t		yaw_cdeg_s;
+	bool		running;	/* on a run (Vehicle Controller FOLLOW ... ALIGN):
+					   only then are slopes and humps measured */
+	bool		waiting;	/* in READY, waiting for START: standing still,
+					   "level" is re-learned from the floor */
 } IMU_MOTION;
 
 typedef struct {
@@ -140,12 +144,40 @@ typedef struct {
 
 void	imu_core_init(IMU_CORE *c, const IMU_PARAMS *p);
 
-/* Names for telemetry */
-const char	*imu_motion_name(int32_t motion);
-const char	*imu_terrain_name(int32_t terrain);
-
 /* One sample, every 10 ms.  a_mg = X, Y, Z in mg (ignored when !valid). */
 void	imu_core_step(IMU_CORE *c, const int32_t a_mg[3], bool valid,
 		      const IMU_MOTION *m, uint32_t now_ms, IMU_OUT *out);
+
+/* ---- IMU results shared with telemetry and Vehicle Controller -----------
+ * The IMU task (core 0) is the only writer; Vehicle Controller reads on
+ * core 1.  Shared as three packed words (IC_STATUS_PK), each written with
+ * one 32-bit store and read with one load.  The fields in different words
+ * are independent, so a reader that gets two words from different 10 ms
+ * cycles still gets valid values.
+ *   w[0]  bit 0      calibrated          w[1]  bits 0-7    last hump mm
+ *         bit 1      last read ok              bits 8-15   humps (stop at 255)
+ *         bits 2-3   terrain (TERRAIN_)        bits 16-27  g0 mg (0..4095)
+ *         bits 4-6   motion (MOTION_)    w[2]  bits 0-15   heading cdeg, +32768
+ *         bits 7-20  pitch cdeg, +8192 (+-81.9 deg)
+ *         bits 21-28 highest hump mm (stop at 255)                          */
+typedef struct {
+	bool		calibrated;	/* 1 s calibration done */
+	bool		ok;		/* last read succeeded */
+	int32_t		pitch_cdeg;	/* + = nose up, centidegrees */
+	int32_t		terrain;	/* TERRAIN_... */
+	int32_t		motion;		/* MOTION_... */
+	int32_t		last_hump_mm;
+	int32_t		max_hump_mm;	/* highest hump of the run */
+	uint32_t	humps;
+	int32_t		heading_cdeg;	/* magnetometer, uncalibrated (cross-check only) */
+	int32_t		g0_mg;		/* |gravity| measured at calibration (about 1000) */
+} IC_STATUS;
+
+typedef struct {
+	uint32_t	w[3];
+} IC_STATUS_PK;
+
+void	ic_status_pack(const IC_STATUS *s, IC_STATUS_PK *pk);
+void	ic_status_unpack(const IC_STATUS_PK *pk, IC_STATUS *s);
 
 #endif /* IMU_CORE_H */

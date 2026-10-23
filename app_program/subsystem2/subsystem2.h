@@ -18,7 +18,9 @@
 #define S2_PRI_MOTION		6	/* highest application priority, core 1 */
 
 /* stop_flags bits (event flag created by Motion Control) */
-#define MC_CMD_STOP		0x01U	/* set / cleared by Vehicle Controller */
+#define MC_CMD_STOP		0x01U	/* set by Vehicle Controller or by Obstacle Scan on a
+					   confirmed close range; cleared only by Vehicle
+					   Controller */
 #define MC_FAULT_STOP		0x02U	/* set by Safety Monitor or Motion Control;
 					   cleared only by Safety Monitor */
 
@@ -27,18 +29,24 @@ IMPORT ID	tid_motion;
 
 /* ---- Motion API --------------------------------------------------------
  * Each call only queues a command on motion_cmd_q (never waits) or sets a
- * stop bit; the Motion Control task does the work in its next 20 ms
- * period.  Returns E_OK, E_PAR for a bad argument, or E_TMOUT when the
- * queue is full.  A new move REPLACES the one in progress.
+ * stop bit; the Motion Control task does the work.  A move or turn starts
+ * at its next 20 ms period; a speed hold and a stop wake the task, so they
+ * act at once.  Returns E_OK, E_PAR for a bad argument, or E_TMOUT when
+ * the queue is full.  A new move REPLACES the one in progress.
  *   id: any number the caller chooses; it comes back in EV_DONE.p2 so the
  *       caller knows which move finished (0 if it does not matter).
- * Vehicle Controller is the only caller of the move functions.  Safety
- * Monitor is the only caller of motion_fault_stop/motion_clear_fault_stop. */
+ * Vehicle Controller is the only caller of the move functions and of
+ * motion_clear_stop.  Obstacle Scan may also call motion_stop (confirmed
+ * obstacle).  Safety Monitor is the only caller of motion_fault_stop /
+ * motion_clear_fault_stop.
+ *   src_ms: for motion_hold_speed, the time (app_ms) of the line reading
+ *       that caused this hold, or 0; Motion Control logs the latency from
+ *       that reading to the new wheel targets (MC_SNAPSHOT.steer_lat_ms). */
 IMPORT ER	motion_move_forward(W distance_mm, W speed_mm_s, W id);
 IMPORT ER	motion_move_backward(W distance_mm, W speed_mm_s, W id);
 IMPORT ER	motion_turn_left(W angle_deg, W id);	/* spin on the spot */
 IMPORT ER	motion_turn_right(W angle_deg, W id);
-IMPORT ER	motion_hold_speed(W left_mm_s, W right_mm_s);	/* until replaced */
+IMPORT ER	motion_hold_speed(W left_mm_s, W right_mm_s, UW src_ms);	/* until replaced */
 IMPORT ER	motion_stop(void);		/* set CMD_STOP and wake Motion Control */
 IMPORT ER	motion_clear_stop(void);	/* clear CMD_STOP */
 IMPORT ER	motion_fault_stop(void);	/* set FAULT_STOP and wake Motion Control */
@@ -47,6 +55,11 @@ IMPORT ER	motion_clear_fault_stop(void);	/* clear FAULT_STOP */
 /* Copy of the latest odometry snapshot (dist_snapshot).  Locks the mutex
    for the copy only, 2 ms timeout.  Returns E_OK or a kernel error. */
 IMPORT ER	motion_get_snapshot(MC_SNAPSHOT *out);
+
+/* Just the odometer (mm), from the same copy: for tasks that need nothing
+   else, so they do not unpack the whole snapshot every cycle.  Returns
+   E_OK or a kernel error (then *odo_mm is not changed). */
+IMPORT ER	motion_get_odo(W *odo_mm);
 
 /* ---- private to subsystem 2 ---- */
 IMPORT ID	motion_cmd_q;

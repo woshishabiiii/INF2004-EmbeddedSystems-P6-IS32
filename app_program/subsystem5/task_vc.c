@@ -15,13 +15,15 @@
 #include "vc_cfg.h"
 #include "../subsystem1/subsystem1.h"	/* telemetry_q, param_get() */
 #include "../subsystem2/subsystem2.h"	/* the motion API */
+#include "../subsystem2/motion_cfg.h"	/* MC_TRACK_MM, MC_TURN_SPEED: a spin's duration */
 #include "../subsystem3/subsystem3.h"	/* lb_steer_params */
 #include "../subsystem4/subsystem4.h"	/* fault_flags, health_stamp(), imu_get_status() */
 #include "../subsystem4/imu_cfg.h"	/* IMU_REQUIRED */
 
 LOCAL VC_CORE		s_vc;
-LOCAL VC_STATUS		s_status;
-LOCAL UH		s_seq_tel;
+LOCAL VC_STATUS		s_status;	/* this task only */
+LOCAL volatile UW	s_status_w[3];	/* s_status packed (VC_ST_PK): the copy telemetry reads */
+LOCAL UB		s_seq_tel;		/* 8-bit APP_MSG sequence, wraps */
 LOCAL UW		s_hold_drops;	/* speed holds lost to a full motion queue */
 
 LOCAL const VC_PARAMS s_params = {
@@ -54,16 +56,34 @@ LOCAL const VC_PARAMS s_params = {
 	VC_T_STARTUP_MS,	/* t_startup_ms */
 	VC_T_ACK_MS,		/* t_ack_ms */
 	VC_T_SCAN_MS,		/* t_scan_ms */
-	VC_T_SEARCH_MS,		/* t_search_ms */
-	VC_T_EXEC_MS,		/* t_exec_ms */
-	VC_T_BYPASS_MS,		/* t_bypass_ms */
-	VC_HUMP_GRACE_MS,	/* hump_grace_ms */
-	VC_HOLD_REFRESH_MS	/* hold_refresh_ms */
+	MC_TRACK_MM,		/* track_mm */
+	MC_TURN_SPEED,		/* turn_speed */
+	MC_ACCEL,		/* min_decel */
+	VC_STEP_MARGIN_MS,	/* step_margin_ms */
+	VC_HUMP_GRACE_MM,	/* hump_grace_mm */
+	VC_HOLD_REFRESH_MS,	/* hold_refresh_ms */
+	VC_SEARCH_STEP_DEG,	/* search_step_deg */
+	VC_SEARCH_MAX_DEG	/* search_max_deg */
 };
 
 EXPORT void vc_get_status(VC_STATUS *out)
 {
-	*out = s_status;
+	VC_ST_PK pk;
+
+	pk.w[0] = s_status_w[0];		/* one load per word */
+	pk.w[1] = s_status_w[1];
+	pk.w[2] = s_status_w[2];
+	vc_st_unpack(&pk, out);
+}
+
+LOCAL void publish_status(void)
+{
+	VC_ST_PK pk;
+
+	vc_st_pack(&s_status, &pk);
+	s_status_w[0] = pk.w[0];		/* one store per word */
+	s_status_w[1] = pk.w[1];
+	s_status_w[2] = pk.w[2];
 }
 
 /* A queue that refuses a command means the system is overloaded: Safety
@@ -84,7 +104,7 @@ LOCAL void run_actions(const VC_ACTIONS *act)
 
 		switch (a->type) {
 		case VA_HOLD:
-			if (motion_hold_speed(a->a, a->b) != E_OK) {
+			if (motion_hold_speed(a->a, a->b, (UW)a->c) != E_OK) {
 				s_hold_drops++;		/* re-sent within VC_HOLD_REFRESH_MS */
 			}
 			break;
@@ -141,6 +161,21 @@ LOCAL void update_status(void)
 	s_status.obstacles_passed = s_vc.obstacles_passed;
 	s_status.run_start_ms = s_vc.run_start_ms;
 	s_status.run_start_odo = s_vc.run_start_odo;
+	publish_status();
+}
+
+/* Events still waiting in the inbox, plus the one just taken */
+LOCAL void log_backlog(void)
+{
+	T_RMBF	r;
+
+	if (tk_ref_mbf(vc_event_q, &r) == E_OK) {
+		UW waiting = VC_EVENT_SLOTS - ((UW)r.frbufsz / (UW)MBF_BYTES(1U, sizeof(APP_MSG))) + 1U;
+
+		if (waiting > s_status.vq_high) {
+			s_status.vq_high = waiting;
+		}
+	}
 }
 
 LOCAL BOOL sensors_ready(void)
@@ -153,10 +188,11 @@ LOCAL BOOL sensors_ready(void)
 
 EXPORT void vc_task(INT stacd, void *exinf)
 {
-	APP_MSG		m;
+	APP_MSG		m;		/* packed, as it comes out of vc_event_q */
+	APP_EVT		e;
 	VC_ACTIONS	act;
 	OS_PROFILE	prof;
-	MC_SNAPSHOT	snap = {0};
+	W		odo_mm = 0;
 	UW		next_tick;
 	INT		len;
 
@@ -171,21 +207,28 @@ EXPORT void vc_task(INT stacd, void *exinf)
 		W	wait = (W)(next_tick - app_ms());
 		UW	now;
 
+		UW	t0;
+
 		len = tk_rcv_mbf(vc_event_q, &m, (wait > 0) ? (TMO)wait : TMO_POL);
+		t0 = app_us();
 		now = app_ms();
-		(void)motion_get_snapshot(&snap);	/* on failure: keep the last one */
+		(void)motion_get_odo(&odo_mm);	/* on failure: keep the last one */
 
 		if (len == (INT)sizeof(m)) {
-			if (m.type == EV_PROFILE) {
-				scan_profile_get(&prof);
-				vc_profile(&s_vc, &m, &prof, now, snap.odo_mm, &act);
+			log_backlog();
+			app_msg_unpack(&m, &e);
+			if (e.type == EV_PROFILE) {
+				if (scan_profile_get(&prof) != E_OK) {
+					prof.valid = false;	/* lock not taken: treat as no profile */
+				}
+				vc_profile(&s_vc, &e, &prof, now, odo_mm, &act);
 			} else {
-				if (((m.type == EV_COMMAND) && (m.p1 == CMD_START)) ||
-				    ((m.type == EV_BUTTON) && (m.p1 == BTN_START))) {
+				if (((e.type == EV_COMMAND) && (e.p1 == CMD_START)) ||
+				    ((e.type == EV_BUTTON) && (e.p1 == BTN_START))) {
 					/* SET values are copied at START */
 					vc_tune(&s_vc, param_get(PARAM_BASE_SPEED), param_get(PARAM_STOP_MM));
 				}
-				vc_event(&s_vc, &m, now, snap.odo_mm, &act);
+				vc_event(&s_vc, &e, now, odo_mm, &act);
 			}
 			run_actions(&act);
 		}
@@ -194,11 +237,13 @@ EXPORT void vc_task(INT stacd, void *exinf)
 			next_tick += (UW)VC_TICK_MS;
 			if ((W)(now - next_tick) >= 0) {
 				next_tick = now + (UW)VC_TICK_MS;	/* far behind: do not catch up */
+				app_task_overrun(TIM_VC, 1U);
 			}
-			vc_tick(&s_vc, now, snap.odo_mm, (sensors_ready() != FALSE), &act);
+			vc_tick(&s_vc, now, odo_mm, (sensors_ready() != FALSE), &act);
 			run_actions(&act);
 			health_stamp(HEALTH_VC);
 		}
 		update_status();
+		app_task_time(TIM_VC, t0);
 	}
 }

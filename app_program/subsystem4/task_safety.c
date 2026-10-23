@@ -14,9 +14,9 @@
 #include "../subsystem2/subsystem2.h"	/* motion_fault_stop() */
 #include "../subsystem5/subsystem5.h"	/* vc_event_q */
 
-LOCAL volatile UW	s_health_ms[HEALTH_SLOTS];
+LOCAL volatile UH	s_health_ms[HEALTH_SLOTS];	/* 16-bit stamps, one writer each */
 LOCAL SM_CORE		s_sm;
-LOCAL UH		s_seq;
+LOCAL UB		s_seq;		/* 8-bit APP_MSG sequence, wraps */
 
 LOCAL const SM_PARAMS s_params = {
 	{
@@ -32,7 +32,8 @@ LOCAL const SM_PARAMS s_params = {
 EXPORT void health_stamp(UINT slot)
 {
 	if (slot < HEALTH_SLOTS) {
-		s_health_ms[slot] = app_ms() | 1U;	/* one writer per slot: no lock; 0 = never */
+		s_health_ms[slot] = (UH)(app_ms() | 1U);	/* one writer per slot, halfword
+								   store: no lock; 0 = never */
 	}
 }
 
@@ -57,14 +58,15 @@ LOCAL void apply(const SM_OUT *out)
 {
 	if (out->latch) {
 		(void)motion_fault_stop();		/* motors off first */
-		tm_printf((UB*)"[SM] FAULT 0x%02x: FAULT_STOP latched\n", s_sm.latched);
+		tm_printf((UB*)"[SM] FAULT 0x%03x: FAULT_STOP latched\n", s_sm.latched);
 	}
 	if (out->release) {
 		(void)motion_clear_fault_stop();
 		tm_printf((UB*)"[SM] faults cleared: FAULT_STOP released\n");
 	}
 	if (out->clear_flags) {
-		(void)tk_clr_flg(fault_flags, 0U);	/* clear every bit */
+		(void)tk_clr_flg(fault_flags, FLT_STATUS);	/* clear every fault bit; keep the
+								   NO_ECHO / WIFI_DOWN status bits */
 		tm_printf((UB*)"[SM] restart requested\n");
 	}
 	if (out->set_restart) {
@@ -72,9 +74,10 @@ LOCAL void apply(const SM_OUT *out)
 	}
 	if (out->raise != 0U) {
 		(void)tk_set_flg(fault_flags, out->raise);
-		tm_printf((UB*)"[SM] a task stopped running (health)\n");
+		tm_printf((UB*)"[SM] a task stopped running (health): 0x%02x"
+			  " (1 motion, 2 line, 4 IMU, 8 scan, 0x10 VC)\n", s_sm.health_bad);
 	}
-	if (app_send_list(vc_event_q, (UB)SRC_SAFETY, &s_seq, &out->ev) != E_OK) {
+	if (app_send_events(vc_event_q, (UB)SRC_SAFETY, &s_seq, &out->ev, NULL) != E_OK) {
 		/* Vehicle Controller's inbox is full.  The motors are already
 		   stopped by FAULT_STOP; record the overflow as well. */
 		(void)tk_set_flg(fault_flags, FLT_QUEUE_OVF);
@@ -86,6 +89,7 @@ EXPORT void safety_task(INT stacd, void *exinf)
 	SM_OUT	out;
 	UW	age[HEALTH_SLOTS];
 	bool	alive[HEALTH_SLOTS];
+	UH	stamp[HEALTH_SLOTS];
 
 	(void)stacd;
 	(void)exinf;
@@ -100,12 +104,16 @@ EXPORT void safety_task(INT stacd, void *exinf)
 		UINT	i;
 		ER	er;
 
+		UW	t0;
+
 		er = tk_wai_flg(fault_flags, sm_wait_pattern(&s_sm), TWF_ORW, &ptn, SM_PERIOD_MS);
+		t0 = app_us();
 		if (er == E_OK) {
 			sm_on_flags(&s_sm, ptn, &out);
 			apply(&out);
+			app_task_time(TIM_SAFETY, t0);	/* fault -> FAULT_STOP path */
 			if ((ptn & FLT_ALL) != 0U) {
-				tm_printf((UB*)"[SM] fault bits 0x%02x\n", ptn & FLT_ALL);
+				tm_printf((UB*)"[SM] fault bits 0x%03x\n", ptn & FLT_ALL);
 			}
 			continue;		/* buttons and health on the 20 ms timeout */
 		}
@@ -113,13 +121,12 @@ EXPORT void safety_task(INT stacd, void *exinf)
 		/* 20 ms timeout */
 		now = app_ms();
 		for (i = 0U; i < HEALTH_SLOTS; i++) {
-			UW stamp = s_health_ms[i];
-
-			alive[i] = (stamp != 0U);
-			age[i] = now - stamp;
+			stamp[i] = s_health_ms[i];	/* one halfword load each */
 		}
+		sm_health_ages(&s_sm, now, stamp, age, alive);
 		sm_on_poll(&s_sm, gpio_get_val(SM_BTN_START_PIN), gpio_get_val(SM_BTN_STOP_PIN),
 			   age, alive, &out);
 		apply(&out);
+		app_task_time(TIM_SAFETY, t0);
 	}
 }

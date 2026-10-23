@@ -1,7 +1,7 @@
 /*
  *	subsystem5.c
- *	Creates vc_event_q (Vehicle Controller's inbox), scan_request_q and
- *	the scan cyclic handler; starts Vehicle Controller (core 1) and
+ *	Creates vc_event_q (Vehicle Controller's inbox), scan_request_q,
+ *	mtx_profile and the scan cyclic handler; starts Vehicle Controller (core 1) and
  *	Obstacle Scan (core 0).
  */
 
@@ -13,11 +13,13 @@
 EXPORT ID	vc_event_q;
 EXPORT ID	scan_request_q;
 EXPORT ID	tid_scan, tid_vc, cyc_scan;
+EXPORT ID	mtx_profile;
 
 EXPORT ER subsystem5_init(void)
 {
 	T_CMBF	cmbf = {0};
 	T_CCYC	ccyc = {0};
+	T_CMTX	cmtx = {0};
 
 	cmbf.mbfatr = TA_TFIFO;
 	cmbf.bufsz  = (SZ)MBF_BYTES(VC_EVENT_SLOTS, sizeof(APP_MSG));
@@ -26,11 +28,20 @@ EXPORT ER subsystem5_init(void)
 	if (vc_event_q < E_OK) {
 		return vc_event_q;
 	}
-	cmbf.bufsz  = (SZ)MBF_BYTES(SCAN_REQ_SLOTS, sizeof(SCAN_REQ));
-	cmbf.maxmsz = (INT)sizeof(SCAN_REQ);
+	cmbf.bufsz  = (SZ)MBF_BYTES(SCAN_REQ_SLOTS, sizeof(SCAN_REQ_PK));
+	cmbf.maxmsz = (INT)sizeof(SCAN_REQ_PK);
 	scan_request_q = tk_cre_mbf(&cmbf);
 	if (scan_request_q < E_OK) {
 		return scan_request_q;
+	}
+	/* The packed profile (13 B) is copied in and out under this kernel
+	   mutex: a copy takes several loads and stores, and the writer (core 0)
+	   and the readers (core 1 and core 0) run at the same time.  Disabling
+	   interrupts would not stop the other core. */
+	cmtx.mtxatr = TA_INHERIT;		/* priority inheritance */
+	mtx_profile = tk_cre_mtx(&cmtx);
+	if (mtx_profile < E_OK) {
+		return mtx_profile;
 	}
 	ccyc.cycatr = TA_HLNG;
 	ccyc.cychdr = (FP)scan_cyclic_handler;

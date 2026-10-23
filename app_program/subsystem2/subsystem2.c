@@ -29,8 +29,8 @@ EXPORT ER subsystem2_init(void)
 	}
 
 	cmbf.mbfatr = TA_TFIFO;
-	cmbf.bufsz  = (SZ)MBF_BYTES(MC_CMD_SLOTS, sizeof(MC_CMD));
-	cmbf.maxmsz = (INT)sizeof(MC_CMD);
+	cmbf.bufsz  = (SZ)MBF_BYTES(MC_CMD_SLOTS, sizeof(MC_CMD_PK));
+	cmbf.maxmsz = (INT)sizeof(MC_CMD_PK);
 	motion_cmd_q = tk_cre_mbf(&cmbf);
 	if (motion_cmd_q < E_OK) {
 		return motion_cmd_q;

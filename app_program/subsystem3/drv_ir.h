@@ -16,9 +16,10 @@ IMPORT ER	ir_init(void);
 /* TRUE = that sensor sees black */
 IMPORT void	ir_read_line(BOOL *left_black, BOOL *right_black);
 
-/* Average, lowest and highest of n readings (0..4095) of the barcode
+/* Average, lowest and highest of n 12-bit readings (0..4095, in UH) of the barcode
    sensor's AO on ADC0 (GP26), about 1 ms apart.  Returns E_OK or a
    kernel error (for example when the ADC device is missing). */
-IMPORT ER	ir_barcode_ao(UINT n, UW *mean, UW *lo, UW *hi);
+#define IR_ADC_MASK	0x0FFFU		/* the RP2040 ADC is 12-bit */
+IMPORT ER	ir_barcode_ao(UINT n, UH *mean, UH *lo, UH *hi);
 
 #endif /* DRV_IR_H */

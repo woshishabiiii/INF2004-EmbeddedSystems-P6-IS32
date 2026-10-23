@@ -16,7 +16,11 @@ EXPORT ER subsystem4_init(void)
 	T_CCYC	ccyc = {0};
 
 	cflg.flgatr = TA_TFIFO | TA_WMUL;
+#if defined(TM_MQTT) && TM_MQTT
+	cflg.iflgptn = FLT_WIFI_DOWN;		/* not connected yet: the network task clears it */
+#else
 	cflg.iflgptn = 0U;
+#endif
 	fault_flags = tk_cre_flg(&cflg);
 	if (fault_flags < E_OK) {
 		return fault_flags;

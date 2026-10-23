@@ -17,9 +17,11 @@
 #include "../subsystem5/subsystem5.h"	/* vc_event_q */
 
 LOCAL IMU_CORE		s_imu;
-LOCAL IMU_STATUS	s_status;
-LOCAL UH		s_seq_vc;
-LOCAL UH		s_seq_tel;
+LOCAL IMU_STATUS	s_status;	/* this task only */
+LOCAL volatile UW	s_status_w[3];	/* s_status packed (IC_STATUS_PK): the copy others read */
+LOCAL UB		s_seq_vc;		/* 8-bit APP_MSG sequence, wraps */
+LOCAL UB		s_seq_tel;		/* 8-bit APP_MSG sequence, wraps */
+LOCAL BOOL		s_terrain_resend;	/* a terrain change was dropped: send it again */
 
 LOCAL const IMU_PARAMS s_params = {
 	IMU_AXIS_FWD,		/* axis_fwd */
@@ -58,7 +60,12 @@ EXPORT void imu_cyclic_handler(void *exinf)
 
 EXPORT void imu_get_status(IMU_STATUS *out)
 {
-	*out = s_status;		/* single writer (this task) */
+	IC_STATUS_PK pk;
+
+	pk.w[0] = s_status_w[0];	/* one load per word */
+	pk.w[1] = s_status_w[1];
+	pk.w[2] = s_status_w[2];
+	ic_status_unpack(&pk, out);
 }
 
 /* "-1.05" from centidegrees (tm_printf has no %f) */
@@ -74,13 +81,22 @@ LOCAL void route_events(const EVT_LIST *ev)
 	UW i;
 
 	for (i = 0U; i < ev->n; i++) {
-		const APP_MSG *m = &ev->ev[i];
+		const APP_EVT *m = &ev->ev[i];
 
 		/* Vehicle Controller needs the terrain (slow down, ignore the
 		   line on a hump) and collisions, but not the motion class */
 		if ((m->type != EV_MOTION) && ((m->type != EV_IMPACT) || (IMU_IMPACT_STOPS != 0))) {
-			if (app_send(vc_event_q, (UB)SRC_IMU, &s_seq_vc, m->type, m->p1, m->p2) != E_OK) {
+			BOOL dropped = FALSE;
+
+			/* An impact must arrive (safety event); terrain and humps are
+			   dropped and counted if the inbox is full, and a lost
+			   terrain change is sent again next cycle (evt_is_safety()) */
+			if (app_send_event(vc_event_q, (UB)SRC_IMU, &s_seq_vc, m->type, m->p1, m->p2,
+					   &dropped) != E_OK) {
 				(void)tk_set_flg(fault_flags, FLT_QUEUE_OVF);
+			}
+			if (dropped && (m->type == (UB)EV_TERRAIN)) {
+				s_terrain_resend = TRUE;
 			}
 		}
 		/* telemetry is best effort: a full queue just drops the record */
@@ -99,6 +115,7 @@ LOCAL void route_events(const EVT_LIST *ev)
 EXPORT void imu_task(INT stacd, void *exinf)
 {
 	IMU_OUT		out;
+	VC_STATUS	vcs;
 	IMU_MOTION	mot;
 	MC_SNAPSHOT	snap = {0};
 	W		a[3] = {0, 0, 0};
@@ -125,10 +142,16 @@ EXPORT void imu_task(INT stacd, void *exinf)
 	imu_core_init(&s_imu, &s_params);
 
 	while (1) {
-		BOOL ok;
+		BOOL	ok;
+		UW	t0;
+		INT	missed;
 
 		(void)tk_slp_tsk(TMO_FEVR);
-		(void)tk_can_wup(TSK_SELF);	/* never "catch up" after a delay */
+		t0 = app_us();
+		missed = tk_can_wup(TSK_SELF);	/* never "catch up" after a delay */
+		if (missed > 0) {
+			app_task_overrun(TIM_IMU, (UW)missed);
+		}
 		health_stamp(HEALTH_IMU);
 
 		ok = (lsm_accel_read(&a[0], &a[1], &a[2]) == E_OK) ? TRUE : FALSE;
@@ -137,6 +160,9 @@ EXPORT void imu_task(INT stacd, void *exinf)
 		mot.speed_mm_s = snap.speed_mm_s;
 		mot.accel_mm_s2 = snap.accel_mm_s2;
 		mot.yaw_cdeg_s = snap.yaw_cdeg_s;
+		vc_get_status(&vcs);			/* is the car on a run? */
+		mot.running = vc_is_running((int32_t)vcs.state);
+		mot.waiting = (vcs.state == (W)VC_READY);
 
 		imu_core_step(&s_imu, a, (ok != FALSE), &mot, app_ms(), &out);
 
@@ -145,6 +171,14 @@ EXPORT void imu_task(INT stacd, void *exinf)
 		}
 		if (out.impact && (IMU_IMPACT_STOPS != 0)) {
 			(void)tk_set_flg(fault_flags, FLT_IMPACT);
+		}
+		if (s_terrain_resend) {
+			BOOL dropped = FALSE;
+
+			s_terrain_resend = FALSE;
+			(void)app_send_event(vc_event_q, (UB)SRC_IMU, &s_seq_vc, (UB)EV_TERRAIN,
+					     s_imu.terrain, s_imu.pitch_cdeg, &dropped);
+			s_terrain_resend = dropped;
 		}
 		route_events(&out.ev);
 
@@ -165,8 +199,8 @@ EXPORT void imu_task(INT stacd, void *exinf)
 			}
 		}
 
-		s_status.calibrated = s_imu.calibrated ? TRUE : FALSE;
-		s_status.ok = ok;
+		s_status.calibrated = s_imu.calibrated;
+		s_status.ok = (ok != FALSE);
 		s_status.pitch_cdeg = s_imu.pitch_cdeg;
 		s_status.terrain = s_imu.terrain;
 		s_status.motion = s_imu.motion;
@@ -174,5 +208,14 @@ EXPORT void imu_task(INT stacd, void *exinf)
 		s_status.max_hump_mm = s_imu.max_hump_mm;
 		s_status.humps = s_imu.humps;
 		s_status.g0_mg = s_imu.g0;
+		{
+			IC_STATUS_PK pk;
+
+			ic_status_pack(&s_status, &pk);
+			s_status_w[0] = pk.w[0];	/* one store per word */
+			s_status_w[1] = pk.w[1];
+			s_status_w[2] = pk.w[2];
+		}
+		app_task_time(TIM_IMU, t0);
 	}
 }

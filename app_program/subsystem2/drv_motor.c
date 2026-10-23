@@ -27,7 +27,7 @@
 /* Wiring fix-ups: set to -1 if a wheel turns BACKWARDS for a positive
    duty, instead of swapping the motor wires. */
 #define MOTOR_DIR_LEFT		(1)	/* MEASURE */
-#define MOTOR_DIR_RIGHT		(1)	/* MEASURE */
+#define MOTOR_DIR_RIGHT		(-1)	/* MEASURE */
 
 typedef struct {
 	UINT	pin_a;
@@ -106,6 +106,16 @@ EXPORT void motor_set(UINT side, W duty)
 		cc = 0U;			/* both low: brake */
 	}
 	out_w(PWM_SLICE_REG(ch->slice, PWM_CHx_CC), cc);
+}
+
+EXPORT void motor_coast(UINT side)
+{
+	UW full = MOTOR_PWM_TOP + 1U;		/* CC = TOP + 1: output always high */
+
+	if (side > MOTOR_RIGHT) {
+		return;
+	}
+	out_w(PWM_SLICE_REG(s_ch[side].slice, PWM_CHx_CC), full | (full << CC_B_SHIFT));
 }
 
 EXPORT void motor_brake_all(void)

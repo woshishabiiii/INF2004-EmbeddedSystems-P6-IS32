@@ -7,6 +7,7 @@
 #include "subsystem5.h"
 #include "scan_cfg.h"
 #include "vc_cfg.h"
+#include "../gpio_irq.h"
 #include "../test_report.h"
 
 #if APP_TEST
@@ -37,7 +38,11 @@ EXPORT void subsystem5_test(void)
 	TEST_CHECK("S5-U05", (vs.state == (W)VC_READY) || (vs.state == (W)VC_STARTUP) ||
 		   (vs.state == (W)VC_SAFE_STOP), "Vehicle Controller waits for START");
 	scan_get_status(&ss);
-	TEST_CHECK("S5-U06", ss.mode == (W)SCAN_IDLE, "no pinging until START");
+	TEST_CHECK("S5-U06", ss.mode == SCAN_IDLE, "no pinging until START");
+
+	/* UART0's pins are GP0/GP1: confirm the kernel build left them to us */
+	TEST_CHECK("S5-U07", (gpio_funcsel(0U) == GPIO_FUNC_SIO) && (gpio_funcsel(1U) == GPIO_FUNC_SIO),
+		   "TRIG GP0 and ECHO GP1 are plain GPIO (UART0 not on them)");
 
 	TEST_SUMMARY("subsystem5");
 }

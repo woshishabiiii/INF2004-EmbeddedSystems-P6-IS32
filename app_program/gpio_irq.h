@@ -49,7 +49,18 @@ IMPORT ER gpio_irq_detach(UINT pin);
 IMPORT ER gpio_irq_start(void);
 
 /* Statistics for timing tests (read from tasks) */
-IMPORT volatile UW gpio_irq_calls;	/* handler entries */
-IMPORT volatile UW gpio_irq_max_us;	/* longest handler run, us */
+IMPORT volatile UW gpio_irq_calls;	/* handler entries: a counter that wraps, only
+					   ever subtracted; over 65,535 in the 5 s
+					   timing period, so 32 bits */
+IMPORT volatile UH gpio_irq_max_us;	/* longest handler run, us: 16 bits as in the
+					   timing record, stops at 65,535 */
+
+/* Function selected on a pin (IO_BANK0 GPIOn_CTRL.FUNCSEL): 5 = SIO
+   (plain GPIO), 2 = UART, 3 = I2C, 4 = PWM, 31 = none.  Used by the
+   on-target tests to confirm that the kernel build left our pins alone
+   (design-review feedback IS32: GP0/GP1, GP16, GP25). */
+#define GPIO_FUNC_I2C	3U
+#define GPIO_FUNC_SIO	5U
+IMPORT UW gpio_funcsel(UINT pin);
 
 #endif /* GPIO_IRQ_H */

@@ -13,20 +13,38 @@
 
 #include "subsystem1.h"
 #include "net_bridge.h"
+#include "../subsystem4/subsystem4.h"	/* fault_flags: FLT_WIFI_DOWN */
 
 /* Topic prefix: replace g07 with your group number */
 #define TOPIC_PREFIX	"car/g32/"
 
-LOCAL const char * const s_topic[3] = {
+LOCAL const char * const s_topic[TOPIC_EVENT + 1U] = {
 	TOPIC_PREFIX "status",
 	TOPIC_PREFIX "telemetry",
 	TOPIC_PREFIX "event",
 };
 
-EXPORT volatile UW	net_rx_drops;
-EXPORT volatile UW	net_errors;
-EXPORT volatile UW	net_connects;
-EXPORT volatile BOOL	net_up;
+EXPORT volatile UB	net_rx_drops;
+EXPORT volatile UB	net_errors;
+EXPORT volatile UB	net_connects;
+EXPORT volatile UW	net_reconnect_ms;	/* NFR: reconnect time, measured */
+LOCAL UW		s_down_ms;		/* when the connection was lost, 0 = up */
+
+/* An 8-bit counter that stops at 255 (one writer: the network task) */
+LOCAL void count8(volatile UB *c)
+{
+	if (*c < 0xFFU) {
+		*c = (UB)(*c + 1U);
+	}
+}
+
+/* Is the link up now?  The FLT_WIFI_DOWN bit, not a separate variable */
+LOCAL BOOL link_is_up(void)
+{
+	T_RFLG rflg;
+
+	return ((tk_ref_flg(fault_flags, &rflg) == E_OK) && ((rflg.flgptn & FLT_WIFI_DOWN) == 0U)) ? TRUE : FALSE;
+}
 
 EXPORT const char *net_topic_name(UINT topic)
 {
@@ -59,24 +77,35 @@ void net_bridge_put(const unsigned char *data, int len)
 {
 	if ((mqtt_rx_mbf <= 0) || (len <= 0) || (len > (int)NET_CMD_MAX) ||
 	    (tk_snd_mbf(mqtt_rx_mbf, data, (INT)len, TMO_POL) != E_OK)) {
-		net_rx_drops++;
+		count8(&net_rx_drops);
 	}
 }
 
 /* The command arrived but was too long, or a publish failed */
 void net_bridge_dropped(void)
 {
-	net_errors++;
+	count8(&net_errors);
 }
 
-/* MQTT connection state changes */
+/* MQTT connection state changes.  Also measures the reconnect time: from
+   the moment the connection was lost to the moment it is back (WiFi
+   re-join every 5 s and broker retry every 3 s in the kernel's code). */
 void net_bridge_link(int connected)
 {
+	UW now = app_ms() | 1U;		/* 0 means "not lost" */
+
 	if (connected != 0) {
-		net_connects++;
-		net_up = TRUE;
+		count8(&net_connects);
+		(void)tk_clr_flg(fault_flags, ~(UINT)FLT_WIFI_DOWN);	/* status bit: never latches */
+		if (s_down_ms != 0U) {
+			net_reconnect_ms = now - s_down_ms;
+			s_down_ms = 0U;
+		}
 	} else {
-		net_up = FALSE;
+		if (link_is_up()) {
+			s_down_ms = now;		/* it was up: the loss starts now */
+		}
+		(void)tk_set_flg(fault_flags, FLT_WIFI_DOWN);	/* reported, not latched */
 	}
 }
 

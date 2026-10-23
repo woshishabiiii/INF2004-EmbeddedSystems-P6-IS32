@@ -13,12 +13,13 @@ EXPORT ID	cyc_line;
 EXPORT const LS_PARAMS lb_steer_params = {
 	LS_D_MIN,		/* d_min */
 	LS_D_RATE,		/* d_rate */
+	LS_RATE_MM,		/* rate_mm */
 	LS_D_MAX,		/* d_max */
 	LS_D_BIAS,		/* d_bias */
 	LS_D_SEARCH,		/* d_search */
-	LS_T_ESCAPE_MS,		/* t_escape_ms */
-	LS_T_DRIFT_MS,		/* t_drift_ms */
-	LB_T_LOST_MS,		/* t_lost_ms */
+	LS_ESCAPE_MM,		/* escape_mm */
+	LS_DRIFT_MM,		/* drift_mm */
+	LB_LOST_MM,		/* lost_mm */
 	LS_SLOW_PCT,		/* slow_pct */
 	LS_START_SIDE		/* start_side */
 };

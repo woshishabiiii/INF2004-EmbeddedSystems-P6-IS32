@@ -1,0 +1,197 @@
+  oval_left        end: state FOLLOW, x 15 y -1 th 359, odo 4684 mm, follow dev max 2.9 mean 1.6, humps 0, barcodes 0 (bad 0), json max 155
+  oval_left        smoothness: largest sudden change of a wheel's target 31 mm/s, outside wheel at most 0 mm/s above base
+  [PASS] oval_left        never lost the line
+  [PASS] oval_left        axle within 25 mm of the line
+  [PASS] oval_left        smooth wheels: no wheel above base_speed, no sudden jump bigger than MC_STEER_PM_MM allows
+  [PASS] oval_left        average speed at least 55 % of the base speed
+  [PASS] oval_left        still following at the end
+  [PASS] oval_left        no queue overflow, every message <= 200 bytes
+  oval_right       end: state FOLLOW, x 7 y 1 th -360, odo 4676 mm, follow dev max 2.9 mean 1.6, humps 0, barcodes 0 (bad 0), json max 155
+  oval_right       smoothness: largest sudden change of a wheel's target 31 mm/s, outside wheel at most 0 mm/s above base
+  [PASS] oval_right       never lost the line
+  [PASS] oval_right       axle within 25 mm of the line
+  [PASS] oval_right       smooth wheels: no wheel above base_speed, no sudden jump bigger than MC_STEER_PM_MM allows
+  [PASS] oval_right       average speed at least 55 % of the base speed
+  [PASS] oval_right       still following at the end
+  [PASS] oval_right       no queue overflow, every message <= 200 bytes
+  oval_tight       end: state FOLLOW, x 607 y -0 th 362, odo 4633 mm, follow dev max 5.9 mean 2.1, humps 0, barcodes 0 (bad 0), json max 155
+  oval_tight       smoothness: largest sudden change of a wheel's target 31 mm/s, outside wheel at most 0 mm/s above base
+  [PASS] oval_tight       never lost the line
+  [PASS] oval_tight       axle within 25 mm of the line
+  [PASS] oval_tight       smooth wheels: no wheel above base_speed, no sudden jump bigger than MC_STEER_PM_MM allows
+  [PASS] oval_tight       average speed at least 55 % of the base speed
+  [PASS] oval_tight       still following at the end
+  [PASS] oval_tight       no queue overflow, every message <= 200 bytes
+  oval_fast        end: state FOLLOW, x 1153 y 598 th 532, odo 6863 mm, follow dev max 6.3 mean 2.3, humps 0, barcodes 0 (bad 0), json max 150
+  oval_fast        smoothness: largest sudden change of a wheel's target 144 mm/s, outside wheel at most 0 mm/s above base
+  [PASS] oval_fast        never lost the line
+  [PASS] oval_fast        axle within 25 mm of the line
+  [PASS] oval_fast        smooth wheels: no wheel above base_speed, no sudden jump bigger than MC_STEER_PM_MM allows
+  [PASS] oval_fast        average speed at least 55 % of the base speed
+  [PASS] oval_fast        still following at the end
+  [PASS] oval_fast        no queue overflow, every message <= 200 bytes
+  oval_slow        end: state FOLLOW, x 309 y -400 th -177, odo 2704 mm, follow dev max 5.4 mean 2.0, humps 0, barcodes 0 (bad 0), json max 152
+  oval_slow        smoothness: largest sudden change of a wheel's target 10 mm/s, outside wheel at most 0 mm/s above base
+  [PASS] oval_slow        never lost the line
+  [PASS] oval_slow        axle within 25 mm of the line
+  [PASS] oval_slow        smooth wheels: no wheel above base_speed, no sudden jump bigger than MC_STEER_PM_MM allows
+  [PASS] oval_slow        average speed at least 55 % of the base speed
+  [PASS] oval_slow        still following at the end
+  [PASS] oval_slow        no queue overflow, every message <= 200 bytes
+  barcode_A        end: state FOLLOW, x 900 y 790 th 93, odo 1701 mm, follow dev max 6.3 mean 1.0, humps 0, barcodes 1 (bad 0), json max 154
+  [PASS] barcode_A        barcode decoded at speed
+  [PASS] barcode_A        turned left and follows the left branch
+  [PASS] barcode_A        no Safe Stop
+  [PASS] barcode_A        no queue overflow, every message <= 200 bytes
+  barcode_B        end: state FOLLOW, x 899 y -792 th -92, odo 1703 mm, follow dev max 6.9 mean 1.0, humps 0, barcodes 1 (bad 0), json max 154
+  [PASS] barcode_B        barcode decoded at speed
+  [PASS] barcode_B        turned right and follows the right branch
+  [PASS] barcode_B        no Safe Stop
+  [PASS] barcode_B        no queue overflow, every message <= 200 bytes
+  barcode_C        end: state FOLLOW, x 1699 y 1 th -1, odo 1699 mm, follow dev max 2.3 mean 0.9, humps 0, barcodes 1 (bad 0), json max 153
+  [PASS] barcode_C        barcode decoded at speed
+  [PASS] barcode_C        went straight across
+  [PASS] barcode_C        no Safe Stop
+  [PASS] barcode_C        no queue overflow, every message <= 200 bytes
+  barcode_D        end: state FOLLOW, x -8 y 0 th 177, odo 1701 mm, follow dev max 4.1 mean 1.0, humps 0, barcodes 1 (bad 0), json max 148
+  [PASS] barcode_D        barcode decoded at speed
+  [PASS] barcode_D        turned round and follows the line back
+  [PASS] barcode_D        no Safe Stop
+  [PASS] barcode_D        no queue overflow, every message <= 200 bytes
+  barcode_Z        end: state FOLLOW, x 1699 y -1 th -0, odo 1699 mm, follow dev max 1.6 mean 0.8, humps 0, barcodes 1 (bad 0), json max 152
+  [PASS] barcode_Z        barcode decoded at speed
+  [PASS] barcode_Z        no command: straight on
+  [PASS] barcode_Z        no Safe Stop
+  [PASS] barcode_Z        no queue overflow, every message <= 200 bytes
+  barcode_A_back   end: state FOLLOW, x 900 y 786 th 93, odo 1702 mm, follow dev max 9.2 mean 1.1, humps 0, barcodes 1 (bad 0), json max 151
+  [PASS] barcode_A_back   barcode decoded at speed
+  [PASS] barcode_A_back   turned left and follows the left branch
+  [PASS] barcode_A_back   no Safe Stop
+  [PASS] barcode_A_back   no queue overflow, every message <= 200 bytes
+  obstacle_mid     end: state FOLLOW, x 2418 y -0 th 2, odo 2606 mm, follow dev max 9.6 mean 1.3, humps 0, barcodes 0 (bad 0), json max 154
+  obstacle_mid     came to rest 151 mm from the obstacle (stop_mm 150) at base 140 mm/s
+  [PASS] obstacle_mid     no collision
+  [PASS] obstacle_mid     came to rest about stop_mm from the obstacle (speed-aware stop)
+  [PASS] obstacle_mid     one bypass
+  [PASS] obstacle_mid     either side (centred box)
+  [PASS] obstacle_mid     rejoined the line
+  [PASS] obstacle_mid     following the original line past the obstacle
+  [PASS] obstacle_mid     detour stays within 450 mm of the line
+  [PASS] obstacle_mid     no queue overflow, every message <= 200 bytes
+  obstacle_right   end: state FOLLOW, x 2462 y 1 th 2, odo 2602 mm, follow dev max 7.6 mean 1.1, humps 0, barcodes 0 (bad 0), json max 154
+  obstacle_right   came to rest 151 mm from the obstacle (stop_mm 150) at base 140 mm/s
+  [PASS] obstacle_right   no collision
+  [PASS] obstacle_right   came to rest about stop_mm from the obstacle (speed-aware stop)
+  [PASS] obstacle_right   one bypass
+  [PASS] obstacle_right   passed on the left (shorter detour)
+  [PASS] obstacle_right   rejoined the line
+  [PASS] obstacle_right   following the original line past the obstacle
+  [PASS] obstacle_right   detour stays within 450 mm of the line
+  [PASS] obstacle_right   no queue overflow, every message <= 200 bytes
+  obstacle_wall    end: state FOLLOW, x 2419 y -1 th 2, odo 2604 mm, follow dev max 9.5 mean 1.3, humps 0, barcodes 0 (bad 0), json max 154
+  obstacle_wall    came to rest 151 mm from the obstacle (stop_mm 150) at base 140 mm/s
+  [PASS] obstacle_wall    no collision
+  [PASS] obstacle_wall    came to rest about stop_mm from the obstacle (speed-aware stop)
+  [PASS] obstacle_wall    one bypass
+  [PASS] obstacle_wall    passed on the right (wall on the left)
+  [PASS] obstacle_wall    rejoined the line
+  [PASS] obstacle_wall    following the original line past the obstacle
+  [PASS] obstacle_wall    detour stays within 450 mm of the line
+  [PASS] obstacle_wall    no queue overflow, every message <= 200 bytes
+  hump             end: state FOLLOW, x 3299 y 1 th -1, odo 3297 mm, follow dev max 1.9 mean 0.8, humps 2, barcodes 0 (bad 0), json max 154
+  hump             hump estimates 12 mm (true 12) and 21 mm (true 25), highest 21
+  [PASS] hump             two humps reported
+  [PASS] hump             first hump 12 mm +/- 4
+  [PASS] hump             second hump 25 mm +/- 6
+  [PASS] hump             highest hump of the run
+  [PASS] hump             kept the line, no Safe Stop
+  [PASS] hump             still following after both humps
+  [PASS] hump             no queue overflow, every message <= 200 bytes
+  [PASS] dead_end         all three search spins done, then HALTED (line not found: a mission failure)
+  [PASS] dead_end         motors stopped by CMD_STOP, no fault latched
+  [PASS] dead_end         START carries on (no RESTART needed)
+  dead_end         end: state FOLLOW, x 874 y 203 th 97, odo 1036 mm, follow dev max 267.3 mean 59.0, humps 0, barcodes 0 (bad 0), json max 152
+  [PASS] dead_end         no queue overflow, every message <= 200 bytes
+  [PASS] stop_start       STOP: READY, duty 0 within 1 ms
+  [PASS] stop_start       repeated sequence number ignored
+  [PASS] stop_start       SET used from the next START
+  [PASS] stop_start       STOP button
+  [PASS] stop_start       FINISH and run summary
+  stop_start       end: state FINISHED, x 1025 y -0 th 4, odo 1025 mm, follow dev max 1.6 mean 0.7, humps 0, barcodes 0 (bad 0), json max 153
+  [PASS] stop_start       no queue overflow, every message <= 200 bytes
+  [PASS] imu_fault        IMU silent -> FLT_IMU -> Safe Stop, motors off
+  [PASS] imu_fault        restart refused while the IMU is still silent
+  [PASS] imu_fault        IMU back + RESTART -> READY
+  [PASS] imu_fault        START button runs again
+  imu_fault        end: state FOLLOW, x 251 y -1 th -1, odo 251 mm, follow dev max 1.6 mean 0.9, humps 0, barcodes 0 (bad 0), json max 149
+  [PASS] imu_fault        no queue overflow
+  impact           end: state SAFE_STOP, x 899 y 1 th -1, odo 899 mm, follow dev max 1.6 mean 0.8, humps 0, barcodes 0 (bad 0), json max 152
+  [PASS] impact           the car hit the hidden obstacle
+  [PASS] impact           collision -> Safe Stop
+  [PASS] impact           impact detected within 300 ms
+  [PASS] impact           motors off
+  line_gap         end: state FOLLOW, x 1798 y 1 th 1, odo 1797 mm, follow dev max 30.8 mean 1.6, humps 0, barcodes 0 (bad 0), json max 152
+  [PASS] line_gap         drove across a 60 mm gap
+  [PASS] line_gap         following after the gap
+  barcode_A_slow   end: state FOLLOW, x 899 y 792 th 90, odo 1703 mm, follow dev max 7.0 mean 1.2, humps 0, barcodes 1 (bad 0), json max 151
+  [PASS] barcode_A_slow   barcode decoded at speed
+  [PASS] barcode_A_slow   turned left and follows the left branch
+  [PASS] barcode_A_slow   no Safe Stop
+  [PASS] barcode_A_slow   no queue overflow, every message <= 200 bytes
+  barcode_B_fast   end: state FOLLOW, x 902 y -784 th -89, odo 1702 mm, follow dev max 6.9 mean 1.3, humps 0, barcodes 1 (bad 0), json max 155
+  [PASS] barcode_B_fast   barcode decoded at speed
+  [PASS] barcode_B_fast   turned right and follows the right branch
+  [PASS] barcode_B_fast   no Safe Stop
+  [PASS] barcode_B_fast   no queue overflow, every message <= 200 bytes
+  obstacle_slow    end: state FOLLOW, x 2419 y 1 th -2, odo 2607 mm, follow dev max 9.6 mean 1.4, humps 0, barcodes 0 (bad 0), json max 151
+  obstacle_slow    came to rest 146 mm from the obstacle (stop_mm 150) at base 80 mm/s
+  [PASS] obstacle_slow    no collision
+  [PASS] obstacle_slow    came to rest about stop_mm from the obstacle (speed-aware stop)
+  [PASS] obstacle_slow    one bypass
+  [PASS] obstacle_slow    either side (centred box)
+  [PASS] obstacle_slow    rejoined the line
+  [PASS] obstacle_slow    following the original line past the obstacle
+  [PASS] obstacle_slow    detour stays within 450 mm of the line
+  [PASS] obstacle_slow    no queue overflow, every message <= 200 bytes
+  obstacle_fast    end: state FOLLOW, x 2407 y 0 th -7, odo 2604 mm, follow dev max 9.9 mean 2.1, humps 0, barcodes 0 (bad 0), json max 153
+  obstacle_fast    came to rest 145 mm from the obstacle (stop_mm 150) at base 300 mm/s
+  [PASS] obstacle_fast    no collision
+  [PASS] obstacle_fast    came to rest about stop_mm from the obstacle (speed-aware stop)
+  [PASS] obstacle_fast    one bypass
+  [PASS] obstacle_fast    either side (centred box)
+  [PASS] obstacle_fast    rejoined the line
+  [PASS] obstacle_fast    following the original line past the obstacle
+  [PASS] obstacle_fast    detour stays within 450 mm of the line
+  [PASS] obstacle_fast    no queue overflow, every message <= 200 bytes
+  line_gap_slow    end: state FOLLOW, x 1799 y -1 th 0, odo 1798 mm, follow dev max 30.0 mean 1.5, humps 0, barcodes 0 (bad 0), json max 146
+  [PASS] line_gap_slow    drove across a 60 mm gap
+  [PASS] line_gap_slow    following after the gap
+  line_gap_fast    end: state FOLLOW, x 1792 y 1 th -6, odo 1799 mm, follow dev max 31.0 mean 1.7, humps 0, barcodes 0 (bad 0), json max 150
+  [PASS] line_gap_fast    drove across a 60 mm gap
+  [PASS] line_gap_fast    following after the gap
+  impact_slow      end: state SAFE_STOP, x 897 y -0 th -3, odo 897 mm, follow dev max 2.0 mean 1.0, humps 0, barcodes 0 (bad 0), json max 150
+  [PASS] impact_slow      the car hit the hidden obstacle
+  [PASS] impact_slow      collision -> Safe Stop
+  [PASS] impact_slow      impact detected within 300 ms
+  [PASS] impact_slow      motors off
+  hump_slow        end: state FOLLOW, x 3298 y -1 th -2, odo 3299 mm, follow dev max 3.1 mean 1.1, humps 2, barcodes 0 (bad 0), json max 154
+  hump_slow        hump estimates 12 mm (true 12) and 21 mm (true 25), highest 21
+  [PASS] hump_slow        two humps reported
+  [PASS] hump_slow        first hump 12 mm +/- 4
+  [PASS] hump_slow        second hump 25 mm +/- 6
+  [PASS] hump_slow        highest hump of the run
+  [PASS] hump_slow        kept the line, no Safe Stop
+  [PASS] hump_slow        still following after both humps
+  [PASS] hump_slow        no queue overflow, every message <= 200 bytes
+  oval_tilt_cal    end: state FOLLOW, x 54 y -1 th 362, odo 4724 mm, follow dev max 2.9 mean 1.5, humps 0, barcodes 0 (bad 0), json max 154
+  [PASS] oval_tilt_cal    tilted at power-up, level in READY: re-learned level, no false slope or hump
+  [PASS] oval_tilt_cal    never lost the line
+  [PASS] oval_tilt_cal    axle within 25 mm of the line, curves included
+  [PASS] oval_tilt_cal    still following at the end
+  oval_tilt_run    end: state FOLLOW, x -198 y 600 th 182, odo 3534 mm, follow dev max 2.7 mean 1.3, humps 0, barcodes 0 (bad 0), json max 150
+  [PASS] oval_tilt_run    the tilted IMU does report a (false) slope
+  [PASS] oval_tilt_run    never lost the line
+  [PASS] oval_tilt_run    axle within 25 mm of the line, curves included
+  [PASS] oval_tilt_run    still following at the end
+
+SIMULATION: 153 checks, 0 failed

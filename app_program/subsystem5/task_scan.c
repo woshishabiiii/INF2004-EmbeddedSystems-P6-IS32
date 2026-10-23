@@ -5,6 +5,12 @@
  *	the RTOS side.  Nothing here waits: servo settling, the 70 ms trigger
  *	gap and the echo are all checked again on the next 10 ms step.  The
  *	only busy-wait is the 10 us trigger pulse in drv_hcsr04.c.
+ *
+ *	On a confirmed close range during a WATCH request with SCAN_STOP_FLAG,
+ *	this task sets CMD_STOP itself (motion_stop) BEFORE it sends the ALERT,
+ *	so the stop does not depend on vc_event_q or on Vehicle Controller
+ *	(design-review feedback IS32).  Vehicle Controller still decides what
+ *	happens next and is the only task that clears CMD_STOP.
  */
 
 #include "subsystem5.h"
@@ -12,18 +18,22 @@
 #include "drv_hcsr04.h"
 #include "drv_servo.h"
 #include "../subsystem1/subsystem1.h"	/* telemetry_q */
+#include "../subsystem2/subsystem2.h"	/* motion_stop() */
 #include "../subsystem4/subsystem4.h"	/* fault_flags, health_stamp() */
 
 LOCAL SCAN_CORE		s_scan;
-LOCAL OS_PROFILE	s_profile;	/* copy for Vehicle Controller and telemetry */
-LOCAL SCAN_STATUS	s_status = {0, -1, 0U};
-LOCAL UH		s_seq_vc;
-LOCAL UH		s_seq_tel;
+LOCAL OS_PROFILE_PK	s_profile;	/* packed copy for Vehicle Controller and telemetry,
+					   guarded by mtx_profile */
+LOCAL SCAN_STATUS	s_status = {SCAN_IDLE, OS_INVALID, 0U};	/* this task only */
+LOCAL volatile UW	s_status_w;	/* s_status packed: the copy telemetry reads */
+LOCAL UB		s_seq_vc;		/* 8-bit APP_MSG sequence, wraps */
+LOCAL UB		s_seq_tel;		/* 8-bit APP_MSG sequence, wraps */
 
 LOCAL const SCAN_PARAMS s_params = {
 	OS_STOP_MM,		/* stop_mm */
-	OS_SLOW_MM,		/* slow_mm */
+	OS_SLOW_EXTRA_MM,	/* slow_extra_mm */
 	OS_SLOW_HYST_MM,	/* slow_hyst_mm */
+	OS_DECEL_GUESS,		/* decel_guess */
 	OS_CONFIRM,		/* confirm */
 	OS_GAP_MS,		/* gap_ms */
 	OS_SETTLE_BASE_MS,	/* settle_base_ms */
@@ -45,26 +55,37 @@ EXPORT void scan_cyclic_handler(void *exinf)
 }
 
 /* Written by this task BEFORE it sends EV_PROFILE; read by Vehicle
-   Controller and Telemetry AFTER they receive it.  The next write comes
-   only after Vehicle Controller asks for another profile. */
-EXPORT void scan_profile_get(OS_PROFILE *out)
+   Controller and Telemetry AFTER they receive it.  Both the write and the
+   copy hold mtx_profile, so a reader never gets half of an old profile
+   and half of a new one (Vehicle Controller also checks the id). */
+EXPORT ER scan_profile_get(OS_PROFILE *out)
 {
-	*out = s_profile;
+	OS_PROFILE_PK	copy;
+	ER		er = tk_loc_mtx(mtx_profile, 2);
+
+	if (er == E_OK) {
+		copy = s_profile;		/* 13 B */
+		(void)tk_unl_mtx(mtx_profile);
+		os_profile_unpack(&copy, out);	/* outside the lock */
+	}
+	return er;
 }
 
 EXPORT void scan_get_status(SCAN_STATUS *out)
 {
-	*out = s_status;
+	scan_st_unpack(s_status_w, out);	/* one 32-bit load; one writer (this task) */
 }
 
 EXPORT ER scan_request(UW mode, W stop_mm, W id)
 {
-	SCAN_REQ req;
+	SCAN_REQ	req;
+	SCAN_REQ_PK	pk;
 
 	req.mode = mode;
 	req.stop_mm = stop_mm;
 	req.id = id;
-	return tk_snd_mbf(scan_request_q, &req, (INT)sizeof(req), TMO_POL);
+	scan_req_pack(&req, &pk);		/* 4 B on the queue */
+	return tk_snd_mbf(scan_request_q, &pk, (INT)sizeof(pk), TMO_POL);
 }
 
 LOCAL INT echo_code(INT hc)
@@ -85,10 +106,11 @@ EXPORT void scan_task(INT stacd, void *exinf)
 {
 	SCAN_IN		in = {0};
 	SCAN_OUT	out;
-	SCAN_REQ	req = {0};
+	SCAN_REQ_PK	pk;
 	W		servo_now = -1;
 	BOOL		refused = FALSE;
-	W		mm = 0;
+	UH		mm = (UH)OS_INVALID;
+	MC_SNAPSHOT	snap = {0};
 
 	(void)stacd;
 	(void)exinf;
@@ -98,27 +120,53 @@ EXPORT void scan_task(INT stacd, void *exinf)
 		tm_printf((UB*)"[OS] ultrasonic set-up failed\n");
 	}
 	scan_core_init(&s_scan, &s_params);
+	s_status_w = scan_st_pack(&s_status);	/* idle, no range yet */
 
 	while (1) {
+		UW	t0;
+		INT	missed;
+
 		(void)tk_slp_tsk(TMO_FEVR);
-		(void)tk_can_wup(TSK_SELF);	/* never "catch up" after a delay */
+		t0 = app_us();
+		missed = tk_can_wup(TSK_SELF);	/* never "catch up" after a delay */
+		if (missed > 0) {
+			app_task_overrun(TIM_SCAN, (UW)missed);
+		}
 		health_stamp(HEALTH_SCAN);
 
 		/* Inputs: the newest request, the ping result */
 		in.now_ms = app_ms();
 		in.have_req = FALSE;
-		while (tk_rcv_mbf(scan_request_q, &req, TMO_POL) == (INT)sizeof(req)) {
-			in.req = req;			/* only the newest one counts */
+		while (tk_rcv_mbf(scan_request_q, &pk, TMO_POL) == (INT)sizeof(pk)) {
+			scan_req_unpack(&pk, &in.req);	/* only the newest one counts */
 			in.have_req = TRUE;
 		}
 		in.echo = refused ? SCAN_ECHO_MISSING : echo_code(hcsr04_poll(&mm));
-		in.range_mm = mm;
+		/* NO_ECHO is a status bit: set and cleared here, never latched
+		   (no echo is normal whenever nothing is in range).  A sensor
+		   that never answers still raises the latched FLT_SCAN below. */
+		if (in.echo == SCAN_ECHO_FAR) {
+			(void)tk_set_flg(fault_flags, FLT_NO_ECHO);
+		} else if (in.echo == SCAN_ECHO_DONE) {
+			(void)tk_clr_flg(fault_flags, ~(UINT)FLT_NO_ECHO);
+		} else {
+			/* nothing new, or missing: leave it */
+		}
+		in.range_mm = (W)mm;
 		in.echo_high = hcsr04_echo_high();
+		if (motion_get_snapshot(&snap) == E_OK) {	/* else keep the last one */
+			in.speed_mm_s = snap.speed_mm_s;
+			in.stop_decel_mm_s2 = snap.stop_decel_mm_s2;
+		}
 		refused = FALSE;
 
 		scan_core_step(&s_scan, &in, &out);
 
-		/* Outputs */
+		/* Outputs: a confirmed obstacle stops the car first */
+		if (out.stop_motors) {
+			(void)motion_stop();
+			tm_printf((UB*)"[OS] obstacle at %d mm: CMD_STOP set\n", s_scan.last_range);
+		}
 		if (out.servo_deg != servo_now) {
 			servo_now = out.servo_deg;
 			servo_set_deg(servo_now);
@@ -130,20 +178,31 @@ EXPORT void scan_task(INT stacd, void *exinf)
 			(void)tk_set_flg(fault_flags, FLT_SCAN);
 		}
 		if (out.profile_ready) {
-			s_profile = s_scan.profile;	/* BEFORE EV_PROFILE is sent */
+			const OS_PROFILE	*p = &s_scan.profile;
+			OS_PROFILE_PK		packed;
+
+			os_profile_pack(p, &packed);		/* outside the lock */
+			if (tk_loc_mtx(mtx_profile, 2) == E_OK) {
+				s_profile = packed;	/* BEFORE EV_PROFILE is sent */
+				(void)tk_unl_mtx(mtx_profile);
+			}
 			(void)app_send(telemetry_q, (UB)SRC_SCAN, &s_seq_tel, (UB)EV_PROFILE_DATA, 0, 0);
 			tm_printf((UB*)"[OS] profile: valid %d, x %d..%d mm, closest %d mm at %d deg, "
 				  "clear L %d R %d, unknown L %u R %u\n",
-				  (INT)s_profile.valid, s_profile.x_left_mm, s_profile.x_right_mm,
-				  s_profile.closest_mm, s_profile.closest_deg, s_profile.left_clear_mm,
-				  s_profile.right_clear_mm, s_profile.unknown_left, s_profile.unknown_right);
+				  (INT)p->valid, p->x_left_mm, p->x_right_mm,
+				  p->closest_mm, p->closest_deg, p->left_clear_mm,
+				  p->right_clear_mm, p->unknown_left, p->unknown_right);
 		}
-		if (app_send_list(vc_event_q, (UB)SRC_SCAN, &s_seq_vc, &out.ev) != E_OK) {
+		/* EV_ALERT must arrive; range zones and profiles are dropped and
+		   counted if the inbox is full (evt_is_safety()) */
+		if (app_send_events(vc_event_q, (UB)SRC_SCAN, &s_seq_vc, &out.ev, NULL) != E_OK) {
 			(void)tk_set_flg(fault_flags, FLT_QUEUE_OVF);
 		}
 
-		s_status.mode = (W)s_scan.req.mode;
+		s_status.mode = s_scan.req.mode & SCAN_MODE_MASK;
 		s_status.range_mm = s_scan.last_range;
 		s_status.pings = s_scan.pings;
+		s_status_w = scan_st_pack(&s_status);	/* one 32-bit store */
+		app_task_time(TIM_SCAN, t0);
 	}
 }

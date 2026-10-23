@@ -16,9 +16,15 @@
    a fault).  0 while it is not wired yet: failures are only printed. */
 #define OS_REQUIRED		1
 
-#define OS_STOP_MM		250	/* default ALERT distance                TUNE */
-#define OS_SLOW_MM		450	/* closer than this: slow down           TUNE */
-#define OS_SLOW_HYST_MM		50	/* back to normal speed beyond 500 mm */
+/* Obstacle stop, speed-aware (scan_core.h): the ALERT fires at OS_STOP_MM
+   plus the distance the car still covers at its measured speed (the
+   confirming pings, then its own measured stopping distance), so it comes
+   to rest about OS_STOP_MM from the obstacle at any speed. */
+#define OS_STOP_MM		150	/* come to rest this far from an obstacle  TUNE */
+#define OS_SLOW_EXTRA_MM	150	/* slow down this much before the ALERT point  TUNE */
+#define OS_SLOW_HYST_MM		50	/* back to normal speed beyond that + this */
+#define OS_DECEL_GUESS		1000	/* mm/s^2, used only until the car has measured
+					   its own stop (Motion Control learns it)  MEASURE */
 #define OS_CONFIRM		2U	/* close readings in a row for an ALERT */
 #define OS_GAP_MS		70U	/* between triggers (datasheet: > 60 ms) */
 #define OS_SETTLE_BASE_MS	40U	/* servo settling after any move         MEASURE */

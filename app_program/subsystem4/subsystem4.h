@@ -27,19 +27,9 @@ IMPORT void	health_stamp(UINT slot);	/* each periodic task, every cycle */
 IMPORT BOOL	safety_faulted(void);		/* TRUE while FAULT_STOP is latched */
 IMPORT UW	safety_latched_bits(void);	/* the faults behind the latch */
 
-/* Latest IMU results, for telemetry and Vehicle Controller */
-typedef struct {
-	BOOL	calibrated;	/* 1 s calibration done */
-	BOOL	ok;		/* last read succeeded */
-	W	pitch_cdeg;	/* + = nose up, centidegrees */
-	W	terrain;	/* TERRAIN_... */
-	W	motion;		/* MOTION_... */
-	W	last_hump_mm;
-	W	max_hump_mm;	/* highest hump of the run */
-	UW	humps;
-	W	heading_cdeg;	/* magnetometer, uncalibrated (cross-check only) */
-	W	g0_mg;		/* |gravity| measured at calibration (about 1000) */
-} IMU_STATUS;
+/* Latest IMU results, for telemetry and Vehicle Controller: shared as
+   packed words (IC_STATUS in imu_core.h), unpacked by imu_get_status(). */
+typedef IC_STATUS IMU_STATUS;
 
 IMPORT void	imu_get_status(IMU_STATUS *out);
 

@@ -1,0 +1,124 @@
+# testing/host unit tests, 2026-10-15T15:34Z, gcc 13, -fsanitize=address,undefined
+[PASS] C39-01   all 43 characters decode forwards
+[PASS] C39-02   all 43 characters decode backwards, flagged reversed
+[PASS] C39-03   all decode with a 30 % speed change across the barcode
+[PASS] C39-04   wide/narrow ratio 2.25 still decodes
+[PASS] C39-05   a misread element is rejected, never a wrong character
+[PASS] C39-06   27 widths: bad count
+[PASS] C39-07   '*' and lower case cannot be encoded as data
+[PASS] C39-08   speed changing 3x between characters still decodes
+[PASS] C39-09   all elements the same width: rejected
+[PASS] BC-01    clean capture decodes; not before the quiet time
+[PASS] BC-02    a 100 us chatter pair inside a bar is removed
+[PASS] BC-03    an edge that leaves the level unchanged is ignored
+[PASS] BC-04    one bar (a line crossing) is ignored silently
+[PASS] BC-05    60 edges: not a barcode
+[PASS] BC-06    command table
+[PASS] LC-01    status sent once, then only on change
+[PASS] LC-02    both black while barely moving: no junction
+[PASS] LC-03    junction reported exactly once per black band
+[PASS] LC-04    line lost after T_lost, on the side last seen (right)
+[PASS] LS-01    left on black: steer left, harder the longer it stays
+[PASS] LS-02    right on black: steer right
+[PASS] LS-03    both black: straight across
+[PASS] LS-04    both white just after the right sensor: lean gently right
+[PASS] LS-05    centred: the lean holds for T_drift, then grows (doubled after 2 x T_drift), full speed
+[PASS] LS-06    white past T_lost: lost, on the right
+[PASS] LS-07    right sensor black a long time, then white: line went outside, slow and turn firmly right
+[PASS] LS-08    no wheel is asked for more than the base speed
+[PASS] MC-01    500 mm move: DONE with its id, within 10 mm
+[PASS] MC-02    both wheels travel the same (straight)
+[PASS] MC-03    odometer and net distance agree
+[PASS] MC-04    left turn 90: wheels opposite, each about counts_per_90deg
+[PASS] MC-05    speed hold ramps up gently, then holds 200 mm/s
+[PASS] MC-06    CMD_STOP: duty 0 on the wake-up itself, queue flushed
+[PASS] MC-07    STOP_ACK once stopped; commands refused while stopped
+[PASS] MC-08    FAULT_STOP wins over everything
+[PASS] MC-09    both bits clear: back to Idle
+[PASS] MC-10    blocked wheels: stall fault, motors off
+[PASS] MC-11    own fault holds until FAULT_STOP has been seen and cleared
+[PASS] MC-12    encoder backwards: detected, not a runaway
+[PASS] MC-13    zero distance invalid
+[PASS] MC-14    unknown command type invalid
+[PASS] MC-15    tune: valid values used, unset (-1) and out-of-range ignored
+[PASS] MC-16    speed hold between ticks: new targets and duties at once, latency logged
+[PASS] MC-17    STOP_ACK carries the stopping distance; stop latency logged
+[PASS] IMU-01   atan2 within 0.07 degree all round (at 1000 mg resolution)
+[PASS] IMU-02   sine within 0.0003
+[PASS] IMU-03   integer square root exact
+[PASS] IMU-04   calibration finds the 1.5 degree mounting tilt
+[PASS] IMU-05   pitch reads level after calibration
+[PASS] IMU-06   braking jolt without travel is not a slope
+[PASS] IMU-07   climbing then level / descending reported
+[PASS] IMU-08   one hump, height 20 mm +/- 5
+[PASS] IMU-09   highest hump of the run kept
+[PASS] IMU-10   jolt plus a sudden speed drop: collision
+[PASS] IMU-11   jolt while the car keeps going: a bump, not a collision
+[PASS] IMU-12   60 deg/s: turning
+[PASS] IMU-13   no speed, no vibration: stationary
+[PASS] IMU-14   five failed reads in a row: IMU fault
+[PASS] SM-01    a one-sample press is ignored (debounce)
+[PASS] SM-02    START after two samples
+[PASS] SM-03    a silent task raises FLT_HEALTH
+[PASS] SM-04    ... once, not every poll
+[PASS] SM-05    START while faulted is a RESTART request
+[PASS] OP-01    centred box: never narrower than it is, closest point about right
+[PASS] OP-02    no echo either side: open, but counted as unknown
+[PASS] OP-03    the box in the path is the obstacle, the wall beside it limits the left gap
+[PASS] OP-04    a missing echo inside the box does not split it
+[PASS] OP-05    no readings: no profile (not a clear path)
+[PASS] SC-01    watch: pings at least 70 ms apart
+[PASS] SC-02    two close readings: one ALERT, not repeated
+[PASS] SC-08    WATCH with the stop flag: the ALERT also stops the car, once
+[PASS] SC-03    profile: box found 250 mm ahead
+[PASS] SC-04    coarse 30..150 and fine 5-degree steps around the box
+[PASS] SC-05    profile finished well within its time limit
+[PASS] SC-06    servo back to the front afterwards
+[PASS] SC-07    no response ten times in a row: sensor fault
+[PASS] SC-09    WATCH without the stop flag: ALERT, no stop
+[PASS] VC-01    START before the sensors are ready: refused
+[PASS] VC-02    START: release, watch ahead, drive
+[PASS] VC-03    barcode A, then a junction: drive the axle onto the junction
+[PASS] VC-04    a DONE with the wrong id is ignored
+[PASS] VC-05    then turn left 90
+[PASS] VC-06    then follow the new branch
+[PASS] VC-07    STOP: READY, motors stopped
+[PASS] VC-08    a fault: Safe Stop from any state
+[PASS] VC-09    START refused while faulted
+[PASS] VC-10    RESTART asks Safety Monitor to clear
+[PASS] VC-11    faults cleared: READY
+[PASS] VC-12    centred box: the preferred side
+[PASS] VC-13    box sticking out right: pass on the left (shorter)
+[PASS] VC-14    no room on the left: pass on the right
+[PASS] VC-15    equal detours: the side with fewer missing echoes
+[PASS] VC-16    box beside the path: continue
+[PASS] VC-17    no room either side: reverse
+[PASS] VC-18    still no room after the retries: HALTED (mission failure, no fault latched)
+[PASS] VC-19    nothing seen clearly: back off and look again
+[PASS] VC-20    no profile in time: scan once more, then HALTED
+[PASS] VC-21    state names
+[PASS] VC-22    START after HALTED carries on with the same run (no RESTART needed)
+[PASS] VC-23    WATCH asks Obstacle Scan to stop the car; not while passing a known obstacle, then again
+[PASS] VC-24    a steering hold carries the time of its line reading
+[PASS] CMD-01   lower case verb
+[PASS] CMD-02   CR LF tolerated
+[PASS] CMD-03   old sequence number refused
+[PASS] CMD-04   trailing word refused
+[PASS] CMD-05   no sequence number refused
+[PASS] CMD-06   out of range
+[PASS] CMD-07   names are exact
+[PASS] CMD-08   SET dist_cal 980
+[PASS] CMD-09   SET refused while running
+[PASS] CMD-10   longer than 64 bytes refused
+[PASS] CMD-11   negative refused by range
+[PASS] CMD-12   absurd number refused
+        largest possible: telemetry 198, status 188, profile 130, summary 178 bytes
+[PASS] TEL-01   every periodic message fits in 200 bytes even with the largest numbers
+[PASS] TEL-02   a quote inside a string is escaped
+[PASS] TEL-03   line status is in the telemetry, not an event
+[PASS] TEL-04   a message that does not fit is refused, never cut short
+[PASS] TEL-05   wheel speeds as a pair
+[PASS] TEL-06   timing message fits in 200 bytes with the largest values
+[PASS] EVT-01   queue policy: safety events must arrive, the rest may be dropped and counted
+
+UNIT: 120 checks, 0 failed

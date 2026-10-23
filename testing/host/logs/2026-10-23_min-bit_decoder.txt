@@ -1,0 +1,16 @@
+# min-bit-v12 at 762f29f (Change Requirement 1), MQTT decoder checks
+[PASS] telemetry: decoded values match what the firmware packed 
+[PASS] status: decoded values match what the firmware packed 
+[PASS] event: decoded values match what the firmware packed 
+[PASS] ack: decoded values match what the firmware packed 
+[PASS] profile: decoded values match what the firmware packed 
+[PASS] summary: decoded values match what the firmware packed 
+[PASS] timing: decoded values match what the firmware packed 
+[PASS] command: the decoder encodes the same 4 bytes as cmd_encode() (c91d50c3)
+[PASS] event payload widths and offsets match s_layout[] in app_evt.c
+[PASS] an unknown version is rejected
+[PASS] a record of the wrong size is rejected
+[PASS] an out-of-range SET is refused before sending
+[PASS] the heartbeat is a 2-byte binary count (0x1234 = 4660)
+
+DECODER: 13 checks, 0 failed

@@ -25,4 +25,8 @@ IMPORT void	motor_set(UINT side, W duty);
 /* Both channels to duty 0 (A = B = low: brake). */
 IMPORT void	motor_brake_all(void);
 
+/* No drive and no brake (A = B = high: outputs open), so the wheel rolls
+   to a stop by itself.  Used for a smooth CMD_STOP. */
+IMPORT void	motor_coast(UINT side);
+
 #endif /* DRV_MOTOR_H */

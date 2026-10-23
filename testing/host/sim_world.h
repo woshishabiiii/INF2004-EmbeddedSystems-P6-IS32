@@ -39,6 +39,8 @@ typedef struct {
 	double	v[2];			/* wheel speeds mm/s, [0] left */
 	double	cnt[2];			/* encoder counts (fractional) */
 	double	duty[2];		/* permille, from the firmware */
+	bool	coast;			/* duty 0 with the motors free-wheeling, not braked */
+	double	imu_extra_deg;		/* extra IMU tilt: car held tilted, board knocked */
 	double	servo_deg;		/* actual servo angle */
 	double	servo_cmd;
 	double	pitch;			/* rad, nose up + */

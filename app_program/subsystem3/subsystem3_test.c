@@ -5,6 +5,7 @@
 
 #include "subsystem3.h"
 #include "line_cfg.h"
+#include "../gpio_irq.h"
 #include "../test_report.h"
 
 #if APP_TEST
@@ -35,7 +36,7 @@ EXPORT void subsystem3_test(void)
 {
 	BC_RESULT	r;
 	LC_CORE		lc;
-	LC_PARAMS	lp = {LB_JUNCTION_MS, LB_JUNCTION_MM, LB_T_LOST_MS};
+	LC_PARAMS	lp = {LB_JUNCTION_MS, LB_JUNCTION_MM, LB_LOST_MM};
 	EVT_LIST	ev;
 	LB_STATUS	st;
 
@@ -58,12 +59,17 @@ EXPORT void subsystem3_test(void)
 	TEST_CHECK("S3-U05", (ev.n == 2U) && (ev.ev[1].type == EV_JUNCTION),
 		   "both black for 20 ms and 10 mm = junction");
 	evt_list_clear(&ev);
-	lc_step(&lc, false, false, 2000U, 10, &ev);
-	TEST_CHECK("S3-U06", (ev.n == 2U) && (ev.ev[1].type == EV_LINE_LOST), "no black for T_lost = line lost");
+	lc_step(&lc, false, false, 2000U, 10 + LB_LOST_MM + 1, &ev);
+	TEST_CHECK("S3-U06", (ev.n == 2U) && (ev.ev[1].type == EV_LINE_LOST),
+		   "no black over T_lost of travel = line lost");
 
 	(void)tk_dly_tsk(20);
 	lb_get_status(&st);
 	TEST_CHECK("S3-U07", (st.reads_ok + st.reads_failed) == 0U, "no barcode read while standing still");
+
+	/* I2C1's default pins are GP6/GP7: confirm the kernel did not start it */
+	TEST_CHECK("S3-U08", (gpio_funcsel(6U) == GPIO_FUNC_SIO) && (gpio_funcsel(7U) == GPIO_FUNC_SIO) &&
+		   (gpio_funcsel(27U) == GPIO_FUNC_SIO), "line and barcode DO pins are plain GPIO (I2C1 off)");
 
 	TEST_SUMMARY("subsystem3");
 }

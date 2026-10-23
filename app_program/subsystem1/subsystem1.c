@@ -5,9 +5,15 @@
  */
 
 #include "subsystem1.h"
+#include "tel_bin.h"
+#include "cmd_parse.h"
+#include "../bitpack.h"
+
+BP_STATIC_ASSERT(NET_PAYLOAD_MAX == TEL_BIN_MAX, payload_is_largest_record);
+#define NET_TX_SLOTS	4U
+BP_STATIC_ASSERT(NET_CMD_MAX == CMD_BYTES, command_is_4_bytes);
 
 #define TEL_Q_SLOTS	16U
-#define NET_TX_SLOTS	4U
 #define NET_RX_SLOTS	4U
 
 EXPORT ID	telemetry_q, mqtt_tx_mbf, mqtt_rx_mbf, tid_telemetry;
@@ -28,7 +34,8 @@ EXPORT ER subsystem1_init(void)
 	if (telemetry_q < E_OK) {
 		return telemetry_q;
 	}
-	/* tx message = 1 byte topic number + JSON payload */
+	/* tx message = 1 byte topic number + binary record (35 B -> 36 + 4 B
+	   per slot with the kernel's rounding: 160 B, was 820 B for JSON) */
 	mqtt_tx_mbf = make_mbf(NET_TX_SLOTS, NET_PAYLOAD_MAX + 1U);
 	if (mqtt_tx_mbf < E_OK) {
 		return mqtt_tx_mbf;
